@@ -34,6 +34,22 @@ function assertScriptsRemoved(result, scriptNames) {
   }
 }
 
+function assertOnlyScriptsRetained(result, scriptNames) {
+  const actualNames = Object.keys(result.manifest.scripts ?? {}).sort();
+  const expectedNames = [...scriptNames].sort();
+
+  assert.deepEqual(
+    actualNames,
+    expectedNames,
+    `expected only ${expectedNames.join(', ')} to be retained, got ${actualNames.join(', ')}`,
+  );
+
+  const retainedNames = new Set(result.retainedScripts.map((script) => script.name));
+  for (const name of scriptNames) {
+    assert.ok(retainedNames.has(name), `${name} should be visible in retained script diagnostics`);
+  }
+}
+
 test('shapePackedRootManifest removes issue #2 package script examples', () => {
   const result = shapePackageWithScripts();
 
@@ -73,9 +89,17 @@ test('shapePackedRootManifest removes representative dev, build, audit, release,
     'test:live-regression',
     'baseline:refactor',
     'prototype:tui-design',
+    'legacy:cleanup:gate',
+    'legacy:cleanup:evidence',
     'pi:install-global',
     'pi:uninstall-global',
   ]);
+});
+
+test('shapePackedRootManifest retains only postinstall from the current root package scripts', () => {
+  const result = shapePackageWithScripts();
+
+  assertOnlyScriptsRetained(result, ['postinstall']);
 });
 
 test('shapePackedRootManifest preserves installed-package runtime behavior and future runtime-looking scripts', () => {
@@ -86,13 +110,7 @@ test('shapePackedRootManifest preserves installed-package runtime behavior and f
   assert.equal(result.manifest.scripts.postinstall, 'node scripts/install.js');
   assert.deepEqual(result.manifest.bin, rootPackage.bin);
   assert.equal(result.manifest.scripts['runtime:healthcheck'], 'node dist/healthcheck.js');
-
-  const retainedNames = new Set(result.retainedScripts.map((script) => script.name));
-  assert.ok(retainedNames.has('postinstall'), 'postinstall should be visible in retained script diagnostics');
-  assert.ok(
-    retainedNames.has('runtime:healthcheck'),
-    'unknown runtime-looking scripts should be retained for later reference validation',
-  );
+  assertOnlyScriptsRetained(result, ['postinstall', 'runtime:healthcheck']);
 });
 
 test('shapePackedRootManifest does not mutate the source package object', () => {

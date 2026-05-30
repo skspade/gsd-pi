@@ -24,6 +24,7 @@ import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.js";
 // NOTE: This import works because loader.ts exports are NOT re-exported from index.ts,
 // avoiding a circular dependency. Extensions can import from @gsd/pi-coding-agent.
 import * as _bundledPiCodingAgent from "../../index.js";
+import * as _bundledPiAuthStorage from "../auth-storage.js";
 import { resolvePath } from "../../utils/paths.js";
 import { createEventBus, type EventBus } from "../event-bus.js";
 import type { ExecOptions } from "../exec.js";
@@ -57,6 +58,7 @@ const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@gsd/pi-ai": _bundledPiAi,
 	"@gsd/pi-ai/oauth": _bundledPiAiOauth,
 	"@gsd/pi-coding-agent": _bundledPiCodingAgent,
+	"@gsd/pi-coding-agent/core/auth-storage.js": _bundledPiAuthStorage,
 };
 
 const require = createRequire(import.meta.url);
@@ -88,6 +90,7 @@ function getAliases(): Record<string, string> {
 	};
 
 	const piCodingAgentEntry = packageIndex;
+	const piAuthStorageEntry = path.resolve(__dirname, "../auth-storage.js");
 
 	const mcpClientEntry = require.resolve("@modelcontextprotocol/sdk/client/index.js");
 	const mcpStdioEntry = require.resolve("@modelcontextprotocol/sdk/client/stdio.js");
@@ -100,6 +103,7 @@ function getAliases(): Record<string, string> {
 
 	_aliases = {
 		"@gsd/pi-coding-agent": piCodingAgentEntry,
+		"@gsd/pi-coding-agent/core/auth-storage.js": piAuthStorageEntry,
 		"@gsd/pi-agent-core": resolveWorkspaceOrImport("pi-agent-core/dist/index.js", "@gsd/pi-agent-core"),
 		"@gsd/pi-tui": resolveWorkspaceOrImport("pi-tui/dist/index.js", "@gsd/pi-tui"),
 		"@gsd/pi-ai": resolveWorkspaceOrImport("pi-ai/dist/index.js", "@gsd/pi-ai"),

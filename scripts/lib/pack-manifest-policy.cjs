@@ -30,6 +30,7 @@ const PREFIX_SCRIPT_CLASSES_TO_REMOVE = [
   { prefix: 'coverage:', reason: 'coverage/internal' },
   { prefix: 'docker:', reason: 'docker/internal' },
   { prefix: 'gsd:', reason: 'source-runner/internal' },
+  { prefix: 'legacy:', reason: 'legacy-cleanup/internal' },
   { prefix: 'pipeline:', reason: 'pipeline/internal' },
   { prefix: 'prototype:', reason: 'prototype/internal' },
   { prefix: 'release:', reason: 'release/internal' },

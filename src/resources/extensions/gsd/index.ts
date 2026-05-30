@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@gsd/pi-coding-agent";
+import { importExtensionModule, type ExtensionAPI } from "@gsd/pi-coding-agent";
 
 export {
   isDepthConfirmationAnswer,
@@ -19,16 +19,25 @@ export default async function registerExtension(pi: ExtensionAPI) {
   // Always register the core /gsd command first, in isolation.
   // This ensures /gsd is available even if the full bootstrap (shortcuts,
   // tools, hooks) fails — e.g. due to a Windows-specific import error.
-  const { registerGSDCommand } = await import("./commands/index.js");
+  const { registerGSDCommand } = await importExtensionModule<typeof import("./commands/index.js")>(
+    import.meta.url,
+    "./commands/index.js",
+  );
   registerGSDCommand(pi);
 
   // Full setup (shortcuts, tools, hooks) in a separate try/catch so that
   // any platform-specific load failure doesn't take out the core command.
   try {
-    const { registerGsdExtension } = await import("./bootstrap/register-extension.js");
+    const { registerGsdExtension } = await importExtensionModule<typeof import("./bootstrap/register-extension.js")>(
+      import.meta.url,
+      "./bootstrap/register-extension.js",
+    );
     registerGsdExtension(pi);
   } catch (err) {
-    const { logWarning } = await import("./workflow-logger.js");
+    const { logWarning } = await importExtensionModule<typeof import("./workflow-logger.js")>(
+      import.meta.url,
+      "./workflow-logger.js",
+    );
     logWarning(
       "bootstrap",
       `Extension setup partially failed — /gsd commands are available but shortcuts/tools may be missing: ${err instanceof Error ? err.message : String(err)}`,
