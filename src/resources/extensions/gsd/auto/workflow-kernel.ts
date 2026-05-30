@@ -187,7 +187,7 @@ export type DispatchNodeKind =
   | "verification"
   | "reprocess";
 
-export type DispatchSidecarKind = "hook" | "triage" | "quick-task" | string;
+export type DispatchSidecarKind = "hook" | "triage" | "quick-task" | "doctor-heal" | string;
 
 export interface DispatchLedgerErrorInput {
   error: unknown;
@@ -513,6 +513,7 @@ export function decideDispatchNodeKind(
 ): DispatchNodeKind {
   if (sidecarKind === "hook") return "hook";
   if (sidecarKind === "triage") return "verification";
+  if (sidecarKind === "doctor-heal") return "verification";
   if (sidecarKind === "quick-task") return "team-worker";
 
   if (unitType.startsWith("hook/")) return "hook";

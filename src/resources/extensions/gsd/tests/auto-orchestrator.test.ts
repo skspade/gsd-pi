@@ -133,6 +133,28 @@ test("advance() returns blocked when health gate denies", async () => {
   assert.ok(calls.includes("gate:pre-dispatch-health-gate:manual-attention"));
 });
 
+test("advance() skips dispatch when health gate queued recovery", async () => {
+  const { deps, calls } = makeDeps({
+    health: {
+      checkResourcesStale: () => null,
+      async preAdvanceGate() {
+        return { kind: "retry", reason: "queued doctor-heal recovery" };
+      },
+      async postAdvanceRecord() { calls.push("health.post"); },
+    },
+  });
+  const orchestrator = createAutoOrchestrator(deps);
+
+  const result = await orchestrator.advance();
+
+  assert.equal(result.kind, "skipped");
+  assert.equal(result.reason, "queued doctor-heal recovery");
+  assert.ok(calls.includes("gate:pre-dispatch-health-gate:retry"));
+  assert.ok(calls.includes("journal:advance-retry"));
+  assert.ok(!calls.includes("state.reconcile"));
+  assert.ok(!calls.includes("dispatch.decide"));
+});
+
 test("advance() stops auto when health gate reports unrecoverable git probe", async () => {
   const { deps } = makeDeps({
     health: {

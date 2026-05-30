@@ -16,6 +16,10 @@ Rules:
 
 {{doctorSummary}}
 
+## Auto-Mode Trigger
+
+{{triggerIssues}}
+
 ## Structured Issues
 
 {{structuredIssues}}
