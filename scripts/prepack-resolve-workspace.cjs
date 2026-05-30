@@ -11,6 +11,7 @@ const {
   INTERNAL_PACKAGE_NAMES,
   RELEASE_WORKSPACE_PACKAGE_DIRS,
 } = require('./lib/version-sync.cjs');
+const { shapePackedRootManifest } = require('./lib/pack-manifest-policy.cjs');
 
 const ROOT_PACKAGE_JSON = path.join(ROOT, 'package.json');
 const TARGET_PACKAGE_JSONS = [
@@ -26,31 +27,15 @@ function writeJson(filePath, data) {
   fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`);
 }
 
-function usesWorkspaceProtocol(pkg) {
-  for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
-    if (!pkg[field]) continue;
-    for (const [dep, range] of Object.entries(pkg[field])) {
-      if (!INTERNAL_PACKAGE_NAMES.has(dep)) continue;
-      if (range === 'workspace:*' || range === '*') return true;
-    }
-  }
-  return false;
-}
-
-function resolvePackageJson(filePath) {
-  if (!fs.existsSync(filePath)) return false;
-
-  const pkg = readJson(filePath);
-  if (!usesWorkspaceProtocol(pkg)) return false;
-
-  const version = pkg.version;
-  const isRoot = filePath === ROOT_PACKAGE_JSON;
-  const relPath = path.relative(ROOT, filePath);
+function backupManifest(filePath, relPath) {
   const backupPath = path.join(BACKUP_DIR, relPath);
   fs.mkdirSync(path.dirname(backupPath), { recursive: true });
   fs.copyFileSync(filePath, backupPath);
+}
 
+function resolveInternalWorkspaceDeps(pkg, { isRoot, version }) {
   let changed = false;
+
   for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
     if (!pkg[field]) continue;
     for (const [dep, range] of Object.entries(pkg[field])) {
@@ -77,15 +62,46 @@ function resolvePackageJson(filePath) {
     }
   }
 
-  if (changed) {
-    writeJson(filePath, pkg);
+  return changed;
+}
+
+function resolvePackageJson(filePath) {
+  if (!fs.existsSync(filePath)) return false;
+
+  let pkg = readJson(filePath);
+  const version = pkg.version;
+  const isRoot = filePath === ROOT_PACKAGE_JSON;
+  const relPath = path.relative(ROOT, filePath);
+  const dependencyChanged = resolveInternalWorkspaceDeps(pkg, { isRoot, version });
+  let removedScripts = [];
+
+  if (isRoot) {
+    const shaped = shapePackedRootManifest(pkg);
+    removedScripts = shaped.removedScripts;
+    if (removedScripts.length > 0) {
+      pkg = shaped.manifest;
+    }
+  }
+
+  const scriptChanged = removedScripts.length > 0;
+  if (!dependencyChanged && !scriptChanged) return false;
+
+  backupManifest(filePath, relPath);
+  writeJson(filePath, pkg);
+
+  if (dependencyChanged) {
     console.log(
       isRoot
         ? `[prepack] Removed internal workspace deps from ${relPath} (shipped via files + postinstall link)`
         : `[prepack] Resolved workspace:* internal deps in ${relPath} to ^${version}`,
     );
   }
-  return changed;
+
+  if (scriptChanged) {
+    console.log(`[prepack] Shaped root scripts in ${relPath} (removed ${removedScripts.length})`);
+  }
+
+  return true;
 }
 
 let resolvedAny = false;
