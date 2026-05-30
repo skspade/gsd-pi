@@ -29,7 +29,7 @@ import { checkFilePathConsistency, checkTaskOrdering } from "../pre-execution-ch
 import type { TaskRow } from "../db-task-slice-rows.js";
 import { buildTaskFileName, gsdProjectionRoot } from "../paths.js";
 import { loadEffectiveGSDPreferences } from "../preferences.js";
-import { createRepositoryRegistryFromPreferences, defaultRepositoryTargets, type RepositoryRegistry } from "../repository-registry.js";
+import { createRepositoryRegistryFromPreferences, defaultRepositoryTargets, type RegisteredRepository, type RepositoryRegistry } from "../repository-registry.js";
 
 
 export interface PlanSliceTaskInput {
@@ -189,17 +189,24 @@ function validateReferencedRepositories(
   return `unknown targetRepositories: ${missing.join(", ")}. Declared repositories: ${Array.from(known).join(", ")}`;
 }
 
+function rootsForPathScope(repo: RegisteredRepository): string[] {
+  return repo.executionRoots.length > 0 ? repo.executionRoots : [repo.root];
+}
+
 function resolveAllowedRootsForPathScope(params: PlanSliceParams, registry: RepositoryRegistry, defaultTargets: string[]): string[] {
   const requested = new Set<string>();
   for (const id of params.targetRepositories ?? defaultTargets) requested.add(id);
   for (const task of params.tasks) {
     for (const id of task.targetRepositories ?? params.targetRepositories ?? defaultTargets) requested.add(id);
   }
-  if (requested.size === 0) return [registry.projectRoot];
-  const roots = Array.from(requested)
-    .map((id) => registry.byId.get(id)?.root)
-    .filter((root): root is string => typeof root === "string");
-  return roots.length > 0 ? roots : [registry.projectRoot];
+  if (requested.size === 0) return registry.executionRoots.length > 0 ? registry.executionRoots : [registry.projectRoot];
+  const roots = Array.from(requested).flatMap((id) => {
+    const repo = registry.byId.get(id);
+    return repo ? rootsForPathScope(repo) : [];
+  });
+  return roots.length > 0
+    ? Array.from(new Set(roots))
+    : (registry.executionRoots.length > 0 ? registry.executionRoots : [registry.projectRoot]);
 }
 
 function toTaskRows(params: PlanSliceParams, defaultTargets: string[]): TaskRow[] {

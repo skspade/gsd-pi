@@ -28,10 +28,13 @@ afterEach(() => {
 function makeDiscussPi() {
   const sent: Array<{ content?: unknown; unitType?: string }> = [];
   const tmp = mkdtempSync(join(tmpdir(), "gsd-discuss-workflow-"));
+  const home = mkdtempSync(join(tmpdir(), "gsd-discuss-home-"));
   const workflowPath = join(tmp, "GSD-WORKFLOW.md");
   writeFileSync(workflowPath, "# Workflow\n");
   const originalWorkflowPath = process.env.GSD_WORKFLOW_PATH;
+  const originalGsdHome = process.env.GSD_HOME;
   process.env.GSD_WORKFLOW_PATH = workflowPath;
+  process.env.GSD_HOME = home;
   return {
     sent,
     tmp,
@@ -45,7 +48,10 @@ function makeDiscussPi() {
     restore() {
       if (originalWorkflowPath === undefined) delete process.env.GSD_WORKFLOW_PATH;
       else process.env.GSD_WORKFLOW_PATH = originalWorkflowPath;
+      if (originalGsdHome === undefined) delete process.env.GSD_HOME;
+      else process.env.GSD_HOME = originalGsdHome;
       rmSync(tmp, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
     },
   };
 }
@@ -64,7 +70,12 @@ function makeDiscussCtx(notifications: Array<{ message: string; level?: string }
     },
     waitForIdle: async () => {},
     model: undefined,
-    modelRegistry: { getProviderAuthMode: () => undefined },
+    modelRegistry: {
+      getAvailable: () => [],
+      getAll: () => [],
+      isProviderRequestReady: () => false,
+      getProviderAuthMode: () => undefined,
+    },
   };
 }
 

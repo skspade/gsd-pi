@@ -3,7 +3,7 @@
  * Also provides maskEditorLine for masking sensitive TUI editor input.
  */
 
-import { CURSOR_MARKER } from "@gsd/pi-tui";
+const CURSOR_MARKER = "\x1b_pi:c\x07";
 
 const TOKEN_PATTERNS = [
   /xoxb-[A-Za-z0-9\-]+/g,    // Slack bot tokens

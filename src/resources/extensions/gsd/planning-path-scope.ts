@@ -1,4 +1,5 @@
-import { isAbsolute, relative, resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { normalizePlannedFileReference } from "./files.js";
 import { shouldValidatePlanningPathReference } from "./pre-execution-checks.js";
 
@@ -7,9 +8,36 @@ export interface PlanningPathScopeField {
   values: string[];
 }
 
+function resolveScopeComparablePath(rawPath: string): string {
+  const absolutePath = resolve(rawPath);
+  try {
+    return realpathSync(absolutePath);
+  } catch {
+    // Planned outputs may not exist yet. Resolve the nearest existing ancestor
+    // through realpath so symlinked worktree roots still compare correctly.
+  }
+
+  const suffixParts: string[] = [];
+  let current = absolutePath;
+  while (true) {
+    if (existsSync(current)) {
+      try {
+        return resolve(realpathSync(current), ...suffixParts.reverse());
+      } catch {
+        return absolutePath;
+      }
+    }
+
+    const parent = dirname(current);
+    if (parent === current) return absolutePath;
+    suffixParts.push(basename(current));
+    current = parent;
+  }
+}
+
 function isInsideBase(basePath: string, candidate: string): boolean {
-  const base = resolve(basePath);
-  const abs = resolve(candidate);
+  const base = resolveScopeComparablePath(basePath);
+  const abs = resolveScopeComparablePath(candidate);
   const rel = relative(base, abs);
   return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
 }

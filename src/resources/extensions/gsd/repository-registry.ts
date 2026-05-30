@@ -10,6 +10,8 @@ import { resolveGsdPathContract } from "./paths.js";
 export interface RegisteredRepository {
   id: string;
   root: string;
+  /** Equivalent roots where this repository may execute, including symlink spellings. */
+  executionRoots: string[];
   role?: string;
   verification?: string[];
   commitPolicy?: "auto" | "skip";
@@ -17,6 +19,7 @@ export interface RegisteredRepository {
 
 export interface RepositoryRegistry {
   projectRoot: string;
+  executionRoots: string[];
   mode: "project" | "parent";
   repositories: RegisteredRepository[];
   byId: ReadonlyMap<string, RegisteredRepository>;
@@ -40,18 +43,31 @@ function assertInsideProjectRoot(projectRoot: string, candidateRoot: string, rep
 
 function resolveRepositoryRoot(
   projectRoot: string,
+  activeProjectRoot: string | null,
   repoId: string,
   repo: WorkspaceRepositoryPreference,
 ): RegisteredRepository {
   const root = resolve(projectRoot, repo.path);
   assertInsideProjectRoot(projectRoot, root, repoId);
+  const activeRoot = activeProjectRoot ? resolve(activeProjectRoot, repo.path) : null;
   return {
     id: repoId,
     root,
+    executionRoots: dedupeRoots([root, activeRoot]),
     role: repo.role,
     verification: repo.verification,
     commitPolicy: repo.commit_policy,
   };
+}
+
+function dedupeRoots(roots: Array<string | null | undefined>): string[] {
+  const deduped: string[] = [];
+  for (const root of roots) {
+    if (!root) continue;
+    const resolved = resolve(root);
+    if (!deduped.includes(resolved)) deduped.push(resolved);
+  }
+  return deduped;
 }
 
 function resolveGitWorkingTreeRoot(basePath: string): string | null {
@@ -78,22 +94,25 @@ export function createRepositoryRegistry(
 ): RepositoryRegistry {
   const contract = resolveGsdPathContract(basePath);
   const projectRoot = resolveGitWorkingTreeRoot(contract.workRoot) ?? contract.projectRoot;
+  const activeProjectRoot = contract.isWorktree ? contract.workRoot : null;
+  const executionRoots = dedupeRoots([projectRoot, activeProjectRoot]);
   const mode = workspacePrefs?.mode ?? "project";
   const repoMap = new Map<string, RegisteredRepository>();
 
   // "project" is reserved: always maps to projectRoot and cannot be overridden.
-  repoMap.set("project", { id: "project", root: projectRoot });
+  repoMap.set("project", { id: "project", root: projectRoot, executionRoots });
 
   if (workspacePrefs?.repositories && Object.hasOwn(workspacePrefs.repositories, "project")) {
     throw new Error('workspace.repositories.project is reserved for the implicit project root repository');
   }
 
   for (const [repoId, repoConfig] of Object.entries(workspacePrefs?.repositories ?? {})) {
-    repoMap.set(repoId, resolveRepositoryRoot(projectRoot, repoId, repoConfig));
+    repoMap.set(repoId, resolveRepositoryRoot(projectRoot, activeProjectRoot, repoId, repoConfig));
   }
 
   return {
     projectRoot,
+    executionRoots,
     mode,
     repositories: Array.from(repoMap.values()),
     byId: repoMap,

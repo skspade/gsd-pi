@@ -2,7 +2,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRepositoryRegistryFromPreferences, defaultRepositoryTargets } from "../repository-registry.ts";
@@ -98,4 +99,33 @@ test("defaultRepositoryTargets returns [project] for a parent-mode registry", (t
   });
 
   assert.deepEqual(defaultRepositoryTargets(registry), ["project"]);
+});
+
+test("repository registry preserves active symlinked worktree root as an execution root", (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-repo-registry-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const projectRoot = join(base, "project");
+  const externalGsd = join(base, "external-gsd");
+  const physicalWorktree = join(externalGsd, "worktrees", "M001");
+  mkdirSync(projectRoot, { recursive: true });
+  mkdirSync(physicalWorktree, { recursive: true });
+  symlinkSync(externalGsd, join(projectRoot, ".gsd"), "junction");
+
+  try {
+    execFileSync("git", ["init"], { cwd: physicalWorktree, stdio: "ignore" });
+  } catch {
+    t.skip("git is required for this registry regression");
+    return;
+  }
+
+  const localWorktree = join(projectRoot, ".gsd", "worktrees", "M001");
+  const registry = createRepositoryRegistryFromPreferences(localWorktree, undefined);
+  const projectRepo = registry.byId.get("project");
+
+  assert.ok(projectRepo);
+  assert.equal(projectRepo.root, realpathSync(physicalWorktree));
+  assert.ok(projectRepo.executionRoots.includes(projectRepo.root));
+  assert.ok(projectRepo.executionRoots.includes(localWorktree));
+  assert.ok(registry.executionRoots.includes(localWorktree));
 });
