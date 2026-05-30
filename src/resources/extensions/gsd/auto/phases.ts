@@ -868,6 +868,29 @@ export async function runPreDispatch(
       );
     }
     if (!healthGate.proceed) {
+      if (healthGate.doctorRecovery) {
+        const recovery = healthGate.doctorRecovery;
+        s.sidecarQueue.push(recovery.sidecar);
+        await runPreDispatchGate({
+          gateId: "pre-dispatch-health-gate",
+          gateType: "execution",
+          outcome: "retry",
+          failureClass: "execution",
+          rationale: "pre-dispatch health gate queued doctor-heal recovery",
+          findings: healthGate.reason,
+        });
+        ctx.ui.notify(
+          `Queued doctor-heal recovery for ${recovery.issueCount} doctor issue(s).`,
+          "warning",
+        );
+        debugLog("autoLoop", {
+          phase: "doctor-recovery-enqueued",
+          issueCount: recovery.issueCount,
+          scope: recovery.scope,
+        });
+        return { action: "continue" };
+      }
+
       await runPreDispatchGate({
         gateId: "pre-dispatch-health-gate",
         gateType: "execution",
@@ -2871,9 +2894,9 @@ export async function runFinalize(
   }
 
   // Verification gate
-  // Hook sidecar items skip verification entirely.
+  // Hook and doctor-heal sidecar items skip verification entirely.
   // Non-hook sidecar items run verification but skip retries (just continue).
-  const skipVerification = sidecarItem?.kind === "hook";
+  const skipVerification = sidecarItem?.kind === "hook" || sidecarItem?.kind === "doctor-heal";
   if (!skipVerification) {
     const verificationResult = await deps.runPostUnitVerification(
       { s, ctx, pi },

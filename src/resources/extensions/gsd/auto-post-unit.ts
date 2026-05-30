@@ -430,7 +430,7 @@ async function runPostUnitGitHubSyncIfNeeded(
   });
 }
 
-/** Enqueue a sidecar item (hook, triage, or quick-task) for the main loop to
+/** Enqueue a sidecar item (hook, triage, quick-task, or doctor-heal) for the main loop to
  *  drain via runUnit. Logs the enqueue event and notifies the UI. */
 function enqueueSidecar(
   s: AutoSession,
@@ -1958,7 +1958,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
  * Post-verification processing: DB dual-write, post-unit hooks, triage
  * capture dispatch, quick-task dispatch.
  *
- * Sidecar work (hooks, triage, quick-tasks) is enqueued on `s.sidecarQueue`
+ * Sidecar work (hooks, triage, quick-tasks, doctor-heal) is enqueued on `s.sidecarQueue`
  * for the main loop to drain via `runUnit()`.
  *
  * Returns:

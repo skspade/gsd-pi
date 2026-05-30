@@ -109,6 +109,7 @@ export function selectReactiveDispatchBatch(
 function sidecarToNodeKind(kind: SidecarItem["kind"]): UokGraphNode["kind"] {
   if (kind === "hook") return "hook";
   if (kind === "triage") return "verification";
+  if (kind === "doctor-heal") return "verification";
   return "team-worker";
 }
 

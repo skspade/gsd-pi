@@ -26,6 +26,8 @@ import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { runEnvironmentChecks } from "./doctor-environment.js";
 import { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
 import { ensureWorkspaceGitReady } from "./workspace-git-preflight.js";
+import type { SidecarItem } from "./auto/session.js";
+import { resolveDoctorTroubleRecovery } from "./doctor-auto-recovery.js";
 
 // ── Health Score Tracking ──────────────────────────────────────────────────
 
@@ -65,6 +67,9 @@ let previousProgressLevel: "green" | "yellow" | "red" = "green";
 
 /** Callback for state transition notifications. Set by auto-mode. */
 let onLevelChange: ((from: string, to: string, summary: string) => void) | null = null;
+
+/** Prevents repeatedly enqueueing doctor-heal for the same stuck auto session. */
+let troubleRecoveryDispatched = false;
 
 /**
  * Register a callback for progress level transitions (green→yellow, yellow→red, etc.).
@@ -198,11 +203,66 @@ export interface PreDispatchHealthResult {
   /** If blocked, the reason to show the user. */
   reason?: string;
   /** Issues found (for logging). */
-  issues: string[];
+  issues?: string[];
   /** Whether fix was applied. */
   fixesApplied: string[];
   /** Auto loop action when blocked (unknown probe → stop). */
   severity?: "pause" | "stop";
+  /** A doctor-heal sidecar that should run before normal dispatch resumes. */
+  doctorRecovery?: {
+    sidecar: SidecarItem;
+    issueCount: number;
+    scope?: string;
+  };
+}
+
+async function resolvePreDispatchDoctorRecovery(
+  basePath: string,
+  issues: string[],
+  fixesApplied: string[],
+  fallbackSeverity: "pause" | "stop" = "pause",
+): Promise<PreDispatchHealthResult | null> {
+  try {
+    const recovery = await resolveDoctorTroubleRecovery({
+      basePath,
+      triggerIssues: issues,
+    });
+    fixesApplied.push(...recovery.fixesApplied);
+
+    if (recovery.action === "proceed") {
+      return { proceed: true, issues, fixesApplied };
+    }
+
+    if (recovery.action === "doctor-heal" && !troubleRecoveryDispatched) {
+      troubleRecoveryDispatched = true;
+      return {
+        proceed: false,
+        reason: `Pre-dispatch health check found ${recovery.issueCount} actionable doctor issue(s); doctor-heal recovery is available before normal dispatch resumes.`,
+        issues,
+        fixesApplied,
+        severity: "pause",
+        doctorRecovery: {
+          sidecar: recovery.sidecar,
+          issueCount: recovery.issueCount,
+          scope: recovery.scope,
+        },
+      };
+    }
+
+    if (recovery.action === "pause") {
+      return {
+        proceed: false,
+        reason: recovery.reason,
+        issues,
+        fixesApplied,
+        severity: fallbackSeverity,
+      };
+    }
+  } catch {
+    // Fall back to the original health-gate pause if doctor recovery itself fails.
+  }
+
+  return null;
 }
 
 /**
@@ -222,6 +282,14 @@ export async function preDispatchHealthGate(basePath: string): Promise<PreDispat
   fixesApplied.push(...gitReady.fixesApplied);
   if (!gitReady.ok) {
     issues.push(gitReady.reason);
+    const recoveryResult = await resolvePreDispatchDoctorRecovery(
+      basePath,
+      issues,
+      fixesApplied,
+      gitReady.severity === "unrecoverable" ? "stop" : "pause",
+    );
+    if (recoveryResult) return recoveryResult;
+
     return {
       proceed: false,
       reason: gitReady.reason,
@@ -344,6 +412,9 @@ export async function preDispatchHealthGate(basePath: string): Promise<PreDispat
 
   // If we had critical issues that couldn't be auto-healed, block dispatch
   if (issues.length > 0) {
+    const recoveryResult = await resolvePreDispatchDoctorRecovery(basePath, issues, fixesApplied);
+    if (recoveryResult) return recoveryResult;
+
     return {
       proceed: false,
       reason: `Pre-dispatch health check failed:\n${issues.map(i => `  - ${i}`).join("\n")}\nRun /gsd doctor fix to resolve.`,
@@ -463,4 +534,5 @@ export function formatHealthSummary(): string {
 export function resetProactiveHealing(): void {
   resetHealthTracking();
   resetEscalation();
+  troubleRecoveryDispatched = false;
 }

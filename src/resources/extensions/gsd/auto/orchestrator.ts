@@ -78,6 +78,23 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
       });
 
       const gate = await this.deps.health.preAdvanceGate();
+      if (gate.kind === "retry") {
+        await this.deps.uokGate.emit({
+          gateId: "pre-dispatch-health-gate",
+          gateType: "execution",
+          outcome: "retry",
+          failureClass: "execution",
+          rationale: "pre-dispatch health gate queued recovery",
+          findings: gate.reason,
+        });
+        const skipped: AutoAdvanceResult = {
+          kind: "skipped",
+          reason: gate.reason,
+        };
+        await this.deps.runtime.journalTransition({ name: "advance-retry", reason: skipped.reason });
+        await this.deps.health.postAdvanceRecord(skipped);
+        return skipped;
+      }
       if (gate.kind === "fail") {
         await this.deps.uokGate.emit({
           gateId: "pre-dispatch-health-gate",

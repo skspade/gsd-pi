@@ -344,9 +344,10 @@ export const KNOWN_UNIT_TYPES = [
   "run-uat",
   "gate-evaluate",
   "rewrite-docs",
-  // Sidecar units (triage, quick-task)
+  // Sidecar units (triage, quick-task, doctor recovery)
   "triage-captures",
   "quick-task",
+  "doctor-heal",
   // Deep planning mode (project-level) units
   "workflow-preferences",
   "discuss-project",
@@ -652,6 +653,21 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     codebaseMap: true,
     preferences: "active-only",
     contextMode: "execution",
+    tools: TOOLS_ALL,
+    artifacts: {
+      inline: ["roadmap", "slice-plan", "task-plan", "requirements", "decisions", "templates"],
+      excerpt: [],
+      onDemand: [],
+    },
+    maxSystemPromptChars: COMMON_BUDGET_MEDIUM,
+  },
+  "doctor-heal": {
+    skills: { mode: "all" },
+    knowledge: "scoped",
+    memory: "prompt-relevant",
+    codebaseMap: true,
+    preferences: "active-only",
+    contextMode: "orchestration",
     tools: TOOLS_ALL,
     artifacts: {
       inline: ["roadmap", "slice-plan", "task-plan", "requirements", "decisions", "templates"],

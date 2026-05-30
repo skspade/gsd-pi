@@ -2348,6 +2348,25 @@ export function createWiredAutoOrchestrationModule(
               fixesApplied: gate.fixesApplied,
             };
           }
+          if (gate.doctorRecovery) {
+            const recovery = gate.doctorRecovery;
+            s.sidecarQueue.push(recovery.sidecar);
+            ctx.ui.notify(
+              `Queued doctor-heal recovery for ${recovery.issueCount} doctor issue(s).`,
+              "warning",
+            );
+            debugLog("autoLoop", {
+              phase: "doctor-recovery-enqueued",
+              issueCount: recovery.issueCount,
+              scope: recovery.scope,
+              source: "orchestrator",
+            });
+            return {
+              kind: "retry",
+              reason: gate.reason ?? "Queued doctor-heal recovery before dispatch.",
+              fixesApplied: gate.fixesApplied,
+            };
+          }
           return {
             kind: "fail",
             reason: gate.reason ?? "Pre-dispatch health check failed — run /gsd doctor for details.",

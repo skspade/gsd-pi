@@ -67,12 +67,12 @@ export interface PendingOrchestrationDispatch {
 }
 
 /**
- * A typed item enqueued by postUnitPostVerification for the main loop to
- * drain via the standard runUnit path. Replaces inline dispatch
- * (pi.sendMessage / s.cmdCtx.newSession()) for hooks, triage, and quick-tasks.
+ * A typed item enqueued for the main loop to drain via the standard runUnit
+ * path. Replaces inline dispatch (pi.sendMessage / s.cmdCtx.newSession()) for
+ * hooks, triage, quick-tasks, and doctor-heal recovery.
  */
 export interface SidecarItem {
-  kind: "hook" | "triage" | "quick-task";
+  kind: "hook" | "triage" | "quick-task" | "doctor-heal";
   unitType: string;
   unitId: string;
   prompt: string;

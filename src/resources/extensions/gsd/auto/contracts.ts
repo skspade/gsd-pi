@@ -106,6 +106,7 @@ export interface WorktreeAdapter {
 
 export type HealthGateResult =
   | { kind: "pass"; fixesApplied?: readonly string[] }
+  | { kind: "retry"; reason: string; fixesApplied?: readonly string[] }
   | { kind: "fail"; reason: string; action?: "pause" | "stop" }
   | { kind: "threw"; error: unknown };
 
@@ -118,8 +119,8 @@ export interface HealthAdapter {
 export interface UokGateInput {
   gateId: string;
   gateType: "policy" | "execution";
-  outcome: "pass" | "fail" | "manual-attention";
-  failureClass: "none" | "policy" | "manual-attention";
+  outcome: "pass" | "fail" | "manual-attention" | "retry";
+  failureClass: "none" | "policy" | "manual-attention" | "execution";
   rationale: string;
   findings?: string;
   milestoneId?: string;

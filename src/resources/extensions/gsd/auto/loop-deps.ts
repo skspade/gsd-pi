@@ -25,6 +25,7 @@ import type { JournalEntry } from "../journal.js";
 import type { MergeReconcileResult } from "../auto-recovery.js";
 import type { UokTurnObserver } from "../uok/contracts.js";
 import type { PostflightResult, PreflightResult } from "../clean-root-preflight.js";
+import type { PreDispatchHealthResult } from "../doctor-proactive.js";
 
 export interface StopAutoOptions {
   preserveWorktree?: boolean;
@@ -96,7 +97,7 @@ export interface LoopDeps {
   // Pre-dispatch health gate
   preDispatchHealthGate: (
     basePath: string,
-  ) => Promise<{ proceed: boolean; reason?: string; fixesApplied: string[] }>;
+  ) => Promise<PreDispatchHealthResult>;
 
   // Worktree state projection (ADR-016 — single Module Interface for all
   // direction-typed projection verbs)
