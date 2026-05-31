@@ -1,11 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 
-const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const projectRoot = process.cwd();
 
 test("postinstall respects PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", () => {
   const result = spawnSync("node", ["scripts/postinstall.js"], {
@@ -16,9 +15,14 @@ test("postinstall respects PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", () => {
       GSD_SKIP_RTK_INSTALL: "1",
     },
     encoding: "utf-8",
+    timeout: 30_000,
   });
 
-  assert.equal(result.status, 0, `postinstall exits cleanly: ${result.stderr}`);
+  assert.equal(
+    result.status,
+    0,
+    `postinstall exits cleanly: ${result.error?.message ?? result.stderr}`,
+  );
 });
 
 test("install script only treats npm postinstall as postinstall mode", () => {
@@ -47,6 +51,7 @@ test("install --help exits cleanly", () => {
   const result = spawnSync("node", ["scripts/install.js", "--help"], {
     cwd: projectRoot,
     encoding: "utf-8",
+    timeout: 10_000,
   });
   assert.equal(result.status, 0);
   assert.match(result.stdout, /--yes/);
