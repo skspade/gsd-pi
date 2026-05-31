@@ -21,12 +21,52 @@ import {
   resolveModelWithFallbacksForUnit,
   resolveAutoSupervisorConfig,
 } from "./preferences.js";
+import type { GSDPreferences, ResolvedModelConfig } from "./preferences.js";
+import type { DynamicRoutingConfig } from "./model-router.js";
 
 // ─── Data Collection ──────────────────────────────────────────────────────
 
 interface ConfigSection {
   title: string;
   rows: Array<{ label: string; value: string; accent?: boolean }>;
+}
+
+const MODEL_UNIT_TYPES: Array<[string, string]> = [
+  ["research", "research-milestone"],
+  ["planning", "plan-milestone"],
+  ["discuss", "discuss-milestone"],
+  ["execution", "execute-task"],
+  ["execution_simple", "execute-task-simple"],
+  ["completion", "complete-slice"],
+  ["validation", "validate-milestone"],
+  ["uat", "run-uat"],
+  ["subagent", "subagent"],
+];
+
+function formatModelConfig(resolved: ResolvedModelConfig): string {
+  if (resolved.fallbacks.length === 0) return resolved.primary;
+  return `${resolved.primary} \u2192 ${resolved.fallbacks.join(" \u2192 ")}`;
+}
+
+function getRoutingDisabledReason(
+  prefs: GSDPreferences | undefined,
+  routing: DynamicRoutingConfig,
+): string | undefined {
+  if (!routing.enabled) return "dynamic_routing.enabled=false";
+  if (prefs?.token_profile === "burn-max") return "token_profile burn-max";
+  if (!routing.tier_models) return "no tier_models configured";
+  return undefined;
+}
+
+function formatEffectiveRouting(
+  disabledReason: string | undefined,
+  pinnedJobs: string[],
+  tieredJobs: string[],
+): string {
+  if (disabledReason) return `no (${disabledReason})`;
+  if (tieredJobs.length > 0 && pinnedJobs.length > 0) return "partial (unpinned jobs only)";
+  if (tieredJobs.length > 0) return "yes";
+  return "no for listed jobs (job models pinned)";
 }
 
 function collectConfigSections(): ConfigSection[] {
@@ -54,47 +94,39 @@ function collectConfigSections(): ConfigSection[] {
   if (prefs?.mode) profileRows.push({ label: "Workflow mode", value: prefs.mode });
   sections.push({ title: "Profile", rows: profileRows });
 
-  // ─── Models ──────────────────────────────────────────────────────────
-  const unitTypes: Array<[string, string]> = [
-    ["research", "research-milestone"],
-    ["planning", "plan-milestone"],
-    ["discuss", "discuss-milestone"],
-    ["execution", "execute-task"],
-    ["completion", "complete-slice"],
-    ["validation", "run-uat"],
-  ];
+  const routing = resolveDynamicRoutingConfig();
+  const routingDisabledReason = getRoutingDisabledReason(prefs, routing);
+  const pinnedJobs: string[] = [];
+  const tieredJobs: string[] = [];
 
+  // ─── Models ──────────────────────────────────────────────────────────
   const modelRows: ConfigSection["rows"] = [];
-  for (const [label, unitType] of unitTypes) {
+  for (const [label, unitType] of MODEL_UNIT_TYPES) {
     const resolved = resolveModelWithFallbacksForUnit(unitType);
     if (resolved) {
-      let val = resolved.primary;
-      if (resolved.fallbacks.length > 0) {
-        val += ` \u2192 ${resolved.fallbacks.join(" \u2192 ")}`;
-      }
-      modelRows.push({ label, value: val });
+      pinnedJobs.push(label);
+      modelRows.push({ label, value: `${formatModelConfig(resolved)} (job model; routing skipped)` });
+    } else if (!routingDisabledReason) {
+      tieredJobs.push(label);
+      modelRows.push({ label, value: "(tiered by dynamic routing)" });
     } else {
-      modelRows.push({ label, value: "(inherit)" });
+      modelRows.push({ label, value: "(session model)" });
     }
-  }
-
-  // subagent is a direct config key
-  const models = prefs?.models as Record<string, unknown> | undefined;
-  const subVal = models?.subagent;
-  if (subVal) {
-    const model = typeof subVal === "string" ? subVal : (subVal as { model?: string })?.model ?? "?";
-    modelRows.push({ label: "subagent", value: model });
-  } else {
-    modelRows.push({ label: "subagent", value: "(inherit)" });
   }
 
   sections.push({ title: "Models", rows: modelRows });
 
   // ─── Dynamic Routing ─────────────────────────────────────────────────
-  const routing = resolveDynamicRoutingConfig();
   const routingRows: ConfigSection["rows"] = [
-    { label: "Enabled", value: routing.enabled ? "yes" : "no", accent: routing.enabled },
+    { label: "Configured", value: routing.enabled ? "yes" : "no", accent: routing.enabled },
+    { label: "Effective", value: formatEffectiveRouting(routingDisabledReason, pinnedJobs, tieredJobs), accent: !routingDisabledReason && tieredJobs.length > 0 },
   ];
+  if (pinnedJobs.length > 0) {
+    routingRows.push({ label: "Pinned jobs", value: `${pinnedJobs.join(", ")} (skip routing)` });
+  }
+  if (!routingDisabledReason && tieredJobs.length > 0) {
+    routingRows.push({ label: "Tiered jobs", value: tieredJobs.join(", ") });
+  }
   if (routing.enabled) {
     routingRows.push({ label: "Escalate on fail", value: routing.escalate_on_failure !== false ? "yes" : "no" });
     routingRows.push({ label: "Budget pressure", value: routing.budget_pressure !== false ? "yes" : "no" });
