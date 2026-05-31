@@ -266,6 +266,50 @@ describe("handleValidateMilestone write ordering (#2725)", () => {
     assert.match(validationMd, /Browser evidence gate/);
   });
 
+  it("keeps pass when UAT verification class is not applicable for a native app", async () => {
+    base = makeTmpBase();
+    const dbPath = join(base, ".gsd", "gsd.db");
+    openDatabase(dbPath);
+    insertMilestone({
+      id: "M001",
+      planning: {
+        successCriteria: [
+          "Native desktop app accepts the review flow",
+          "Local state persists across window reopen",
+        ],
+        verificationUat: "Run native macOS desktop QA against the GPUI window.",
+      },
+    });
+    insertSlice({
+      id: "S01",
+      milestoneId: "M001",
+      demo: "Open the native app and complete the review flow.",
+    });
+
+    const result = await handleValidateMilestone(
+      {
+        ...VALID_PARAMS,
+        verificationClasses:
+          `${VALID_PARAMS.verificationClasses}\n- UAT: not applicable - native macOS desktop app, no browser surface`,
+      },
+      base,
+    );
+
+    assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
+    assert.equal(result.verdict, "pass");
+
+    const adapter = _getAdapter()!;
+    const row = adapter.prepare(
+      `SELECT status FROM assessments WHERE milestone_id = 'M001' AND scope = 'milestone-validation'`,
+    ).get() as { status: string } | undefined;
+    assert.equal(row?.status, "pass");
+
+    const filePath = join(base, ".gsd", "milestones", "M001", "M001-VALIDATION.md");
+    const validationMd = readFileSync(filePath, "utf-8");
+    assert.match(validationMd, /verdict: pass/);
+    assert.doesNotMatch(validationMd, /Browser evidence gate/);
+  });
+
   it("keeps pass when browser criteria have persisted browser evidence", async () => {
     base = makeTmpBase();
     const dbPath = join(base, ".gsd", "gsd.db");
