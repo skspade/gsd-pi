@@ -11,6 +11,7 @@ const {
   INTERNAL_PACKAGE_NAMES,
   RELEASE_WORKSPACE_PACKAGE_DIRS,
 } = require('./lib/version-sync.cjs');
+const { pruneRootPackageScripts } = require('./lib/package-scripts.cjs');
 
 const ROOT_PACKAGE_JSON = path.join(ROOT, 'package.json');
 const TARGET_PACKAGE_JSONS = [
@@ -41,16 +42,19 @@ function resolvePackageJson(filePath) {
   if (!fs.existsSync(filePath)) return false;
 
   const pkg = readJson(filePath);
-  if (!usesWorkspaceProtocol(pkg)) return false;
+  const isRoot = filePath === ROOT_PACKAGE_JSON;
+  const hasWorkspaceProtocol = usesWorkspaceProtocol(pkg);
+  const scriptsChanged = isRoot ? pruneRootPackageScripts(pkg) : false;
+  if (!hasWorkspaceProtocol && !scriptsChanged) return false;
 
   const version = pkg.version;
-  const isRoot = filePath === ROOT_PACKAGE_JSON;
   const relPath = path.relative(ROOT, filePath);
   const backupPath = path.join(BACKUP_DIR, relPath);
   fs.mkdirSync(path.dirname(backupPath), { recursive: true });
   fs.copyFileSync(filePath, backupPath);
 
-  let changed = false;
+  let changed = scriptsChanged;
+  let workspaceChanged = false;
   for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
     if (!pkg[field]) continue;
     for (const [dep, range] of Object.entries(pkg[field])) {
@@ -65,6 +69,7 @@ function resolvePackageJson(filePath) {
         // registry and fail. Drop them; runtime resolution goes through the symlinks.
         delete pkg[field][dep];
         changed = true;
+        workspaceChanged = true;
       } else {
         // Workspace package manifests ship as files (never npm-installed), so their
         // internal ranges are informational only. Pin to ^version for a clean tarball.
@@ -72,6 +77,7 @@ function resolvePackageJson(filePath) {
         if (pkg[field][dep] !== resolved) {
           pkg[field][dep] = resolved;
           changed = true;
+          workspaceChanged = true;
         }
       }
     }
@@ -79,11 +85,16 @@ function resolvePackageJson(filePath) {
 
   if (changed) {
     writeJson(filePath, pkg);
-    console.log(
-      isRoot
-        ? `[prepack] Removed internal workspace deps from ${relPath} (shipped via files + postinstall link)`
-        : `[prepack] Resolved workspace:* internal deps in ${relPath} to ^${version}`,
-    );
+    if (scriptsChanged) {
+      console.log(`[prepack] Reduced ${relPath} npm scripts to runtime install surface`);
+    }
+    if (workspaceChanged) {
+      console.log(
+        isRoot
+          ? `[prepack] Removed internal workspace deps from ${relPath} (shipped via files + postinstall link)`
+          : `[prepack] Resolved workspace:* internal deps in ${relPath} to ^${version}`,
+      );
+    }
   }
   return changed;
 }

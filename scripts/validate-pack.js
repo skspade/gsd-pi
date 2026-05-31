@@ -15,6 +15,7 @@ const __dirname = dirname(__filename);
 const ROOT = resolve(__dirname, '..');
 const require = createRequire(import.meta.url);
 const { getLinkablePackages } = require('./lib/workspace-manifest.cjs');
+const { findMissingPublishedScriptFiles } = require('./lib/package-scripts.cjs');
 
 let tarball = null;
 let installDir = null;
@@ -183,6 +184,7 @@ try {
   const entryCount = packEntry.entryCount;
   const unpackedSize = packEntry.unpackedSize;
   const allPackedPaths = packEntry.files.map((entry) => entry.path);
+  const packedRootPkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
   const pnpmStorePaths = allPackedPaths.filter((p) => p.startsWith('node_modules/.pnpm/'));
   const nestedNmPaths = allPackedPaths.filter((p) => /^packages\/[^/]+\/node_modules\//.test(p));
   const bloatErrors = [];
@@ -243,6 +245,19 @@ try {
     process.exit(1);
   }
   console.log('    Critical files present.');
+
+  // --- Guard: published npm scripts must only reference shipped files ---
+  console.log('==> Checking published npm script file references...');
+  const missingScriptFiles = findMissingPublishedScriptFiles(packedRootPkg, packedFiles);
+  if (missingScriptFiles.length > 0) {
+    console.log('ERROR: Published package.json scripts reference files missing from the tarball:');
+    for (const item of missingScriptFiles) {
+      console.log(`    ${item.script}: ${item.path}`);
+    }
+    console.log('    Keep the package runtime-only or add the referenced files to package.json "files".');
+    process.exit(1);
+  }
+  console.log('    Published npm script file references are present.');
 
   // --- Install test ---
   console.log('==> Testing install in isolated directory...');
