@@ -186,6 +186,45 @@ test("flat_rate_providers is a recognized preference key (no warning)", () => {
   );
 });
 
+test("auto_resolve preferences validate and pass through", () => {
+  const { errors, warnings, preferences } = validatePreferences({
+    auto_resolve: {
+      enabled: true,
+      max_attempts_per_gate: 2,
+      write_scope: "state-and-config",
+      include_provider: false,
+      include_budget_context: true,
+    },
+  });
+
+  assert.equal(errors.length, 0);
+  assert.equal(warnings.filter(w => w.includes("auto_resolve")).length, 0);
+  assert.deepEqual(preferences.auto_resolve, {
+    enabled: true,
+    max_attempts_per_gate: 2,
+    write_scope: "state-and-config",
+    include_provider: false,
+    include_budget_context: true,
+  });
+});
+
+test("auto_resolve rejects invalid values and warns on unknown keys", () => {
+  const { errors, warnings, preferences } = validatePreferences({
+    auto_resolve: {
+      enabled: "yes",
+      max_attempts_per_gate: 0,
+      write_scope: "source",
+      future_mode: true,
+    },
+  } as any);
+
+  assert.ok(errors.some(e => e.includes("auto_resolve.enabled")));
+  assert.ok(errors.some(e => e.includes("auto_resolve.max_attempts_per_gate")));
+  assert.ok(errors.some(e => e.includes("auto_resolve.write_scope")));
+  assert.ok(warnings.some(w => w.includes('unknown auto_resolve key "future_mode"')));
+  assert.equal(preferences.auto_resolve, undefined);
+});
+
 test("slice_parallel preferences validate and pass through", () => {
   const { preferences, errors, warnings } = validatePreferences({
     slice_parallel: { enabled: true, max_workers: 8 },

@@ -25,6 +25,7 @@ import type { JournalEntry } from "../journal.js";
 import type { MergeReconcileResult } from "../auto-recovery.js";
 import type { UokTurnObserver } from "../uok/contracts.js";
 import type { PostflightResult, PreflightResult } from "../clean-root-preflight.js";
+import type { AutoResolveDecision, AutoResolveGateInput } from "../auto-resolver.js";
 
 export interface StopAutoOptions {
   preserveWorktree?: boolean;
@@ -71,6 +72,7 @@ export interface LoopDeps {
     options?: StopAutoOptions,
   ) => Promise<void>;
   pauseAuto: PauseAutoFn;
+  maybeAutoResolveGate?: (input: AutoResolveGateInput) => Promise<AutoResolveDecision>;
   clearUnitTimeout: () => void;
   updateProgressWidget: (
     ctx: ExtensionContext,
