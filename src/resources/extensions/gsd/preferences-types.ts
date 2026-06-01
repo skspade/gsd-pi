@@ -102,6 +102,7 @@ export const KNOWN_PREFERENCE_KEYS = new Set<string>([
   "skill_discovery",
   "skill_staleness_days",
   "auto_supervisor",
+  "auto_resolve",
   "uat_dispatch",
   "unique_milestone_ids",
   "budget_ceiling",
@@ -257,6 +258,19 @@ export interface AutoSupervisorConfig {
   hard_timeout_minutes?: number;
 }
 
+export interface AutoResolvePreferences {
+  /** Master switch. Default: true. */
+  enabled?: boolean;
+  /** Max attempts per stable gate fingerprint. Default: 1. */
+  max_attempts_per_gate?: number;
+  /** Resolver write scope. v1 intentionally excludes user source edits. */
+  write_scope?: "state-and-config";
+  /** Include provider/model recovery gates. Default: true. */
+  include_provider?: boolean;
+  /** Include budget/context recovery gates. Default: true. */
+  include_budget_context?: boolean;
+}
+
 export interface RemoteQuestionsConfig {
   channel: "slack" | "discord" | "telegram";
   channel_id: string | number;
@@ -366,6 +380,7 @@ export interface GSDPreferences {
   skill_discovery?: SkillDiscoveryMode;
   skill_staleness_days?: number;  // Skills unused for N days get deprioritized (#599). 0 = disabled. Default: 60.
   auto_supervisor?: AutoSupervisorConfig;
+  auto_resolve?: AutoResolvePreferences;
   uat_dispatch?: boolean;
   unique_milestone_ids?: boolean;
   budget_ceiling?: number;

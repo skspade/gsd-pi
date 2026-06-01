@@ -93,6 +93,11 @@ import {
   detectRootWriteLeak,
   formatRootWriteLeakMessage,
 } from "../root-write-leak-guard.js";
+import {
+  maybeAutoResolveGate as defaultMaybeAutoResolveGate,
+  type AutoResolveDecision,
+  type AutoResolveGateInput,
+} from "../auto-resolver.js";
 
 export const STUCK_WINDOW_SIZE = 6;
 const STUCK_RECOVERY_ATTEMPTS_KEY = "stuck_recovery_attempts";
@@ -286,6 +291,32 @@ function formatBlockedResumeMessage(blockers: string[]): string {
   return `Blocked: ${classifiedBlockers.map((classifiedBlocker) => classifiedBlocker.blocker).join(", ")}. Fix and run /gsd auto to resume.`;
 }
 
+async function tryAutoResolveGate(
+  ic: IterationContext,
+  input: Omit<AutoResolveGateInput, "basePath" | "ctx" | "pi" | "prefs">,
+): Promise<AutoResolveDecision> {
+  const { ctx, pi, s, deps, prefs } = ic;
+  const resolver = (deps as LoopDeps & {
+    maybeAutoResolveGate?: (input: AutoResolveGateInput) => Promise<AutoResolveDecision>;
+  }).maybeAutoResolveGate ?? defaultMaybeAutoResolveGate;
+  const result = await resolver({
+    ...input,
+    basePath: s.basePath,
+    ctx,
+    pi,
+    prefs,
+    unitType: input.unitType ?? s.currentUnit?.type,
+    unitId: input.unitId ?? s.currentUnit?.id,
+  });
+  if (result.action === "resume") {
+    deps.invalidateAllCaches();
+    ctx.ui.notify(`Auto-resolver: ${result.summary}`, "info");
+  } else if (result.action === "pause" || result.action === "stop") {
+    ctx.ui.notify(`Auto-resolver could not continue automatically: ${result.summary}`, "warning");
+  }
+  return result;
+}
+
 function resolveEmptyWorktreeWithProjectContent(
   unitRoot: string,
   projectRoot: string,
@@ -303,7 +334,7 @@ async function validateSourceWriteWorktreeSafety(
   unitId: string,
   milestoneId: string | undefined,
   phase: string,
-): Promise<{ action: "break"; reason: string } | null> {
+): Promise<({ action: "break"; reason: string } | { action: "retry"; reason: string }) | null> {
   const { ctx, pi, s, deps } = ic;
   if (!s.basePath) return null;
 
@@ -369,6 +400,16 @@ async function validateSourceWriteWorktreeSafety(
     basePath: s.basePath,
     projectRoot,
   });
+  const autoResolve = await tryAutoResolveGate(ic, {
+    kind: "worktree-safety",
+    reason: msg,
+    unitType,
+    unitId,
+    milestoneId,
+  });
+  if (autoResolve.action === "resume") {
+    return { action: "retry", reason: "worktree-safety-auto-resolved" };
+  }
   ctx.ui.notify(msg, "error");
   await deps.stopAuto(ctx, pi, formatWorktreeSafetyStopReason(result));
   return { action: "break", reason: result.kind };
@@ -903,6 +944,14 @@ export async function runPreDispatch(
         healthGate.reason || "Pre-dispatch health check failed — run /gsd doctor for details.",
         "error",
       );
+      const autoResolve = await tryAutoResolveGate(ic, {
+        kind: "health-gate",
+        reason: healthGate.reason || "Pre-dispatch health check failed",
+      });
+      if (autoResolve.action === "resume") {
+        debugLog("autoLoop", { phase: "auto-resolver-resume", reason: "health-gate-failed" });
+        return { action: "continue" };
+      }
       await deps.pauseAuto(ctx, pi, undefined, { expectedCurrentUnit });
       debugLog("autoLoop", { phase: "exit", reason: "health-gate-failed" });
       return { action: "break", reason: "health-gate-failed" };
@@ -1010,6 +1059,15 @@ export async function runPreDispatch(
           milestoneId: state.activeMilestone?.id ?? undefined,
         });
         ctx.ui.notify(`Plan gate failed-closed: ${reason}\n\nIf this keeps happening, try: /gsd doctor heal`, "error");
+        const autoResolve = await tryAutoResolveGate(ic, {
+          kind: "plan-v2",
+          reason,
+          milestoneId: state.activeMilestone?.id ?? undefined,
+        });
+        if (autoResolve.action === "resume") {
+          debugLog("autoLoop", { phase: "auto-resolver-resume", reason: "plan-v2-gate-failed" });
+          return { action: "continue" };
+        }
         await deps.pauseAuto(ctx, pi);
         return { action: "break", reason: "plan-v2-gate-failed" };
       }
@@ -1296,6 +1354,16 @@ export async function runPreDispatch(
       );
     } else if (state.phase === "blocked") {
       const blockedResumeMessage = formatBlockedResumeMessage(state.blockers);
+      const autoResolve = await tryAutoResolveGate(ic, {
+        kind: "blocked",
+        reason: blockedResumeMessage,
+        blockers: state.blockers,
+        milestoneId: state.activeMilestone?.id ?? undefined,
+      });
+      if (autoResolve.action === "resume") {
+        debugLog("autoLoop", { phase: "auto-resolver-resume", reason: "blocked-no-active-milestone" });
+        return { action: "continue" };
+      }
       // Pause instead of hard-stop so the session is resumable with `/gsd auto`.
       // Hard-stop here was causing premature termination when slice dependencies
       // were temporarily unresolvable (e.g. after reassessment added new slices).
@@ -1332,6 +1400,15 @@ export async function runPreDispatch(
   // Mid-merge safety check
   const mergeReconcileResult = deps.reconcileMergeState(s.basePath, ctx);
   if (mergeReconcileResult === "blocked") {
+    const autoResolve = await tryAutoResolveGate(ic, {
+      kind: "merge-reconciliation",
+      reason: "merge reconciliation blocked",
+      milestoneId: mid,
+    });
+    if (autoResolve.action === "resume") {
+      debugLog("autoLoop", { phase: "auto-resolver-resume", reason: "merge-reconciliation-blocked" });
+      return { action: "continue" };
+    }
     await deps.pauseAuto(ctx, pi);
     debugLog("autoLoop", { phase: "exit", reason: "merge-reconciliation-blocked" });
     return { action: "break", reason: "merge-reconciliation-blocked" };
@@ -1401,6 +1478,16 @@ export async function runPreDispatch(
   // Terminal: blocked — pause instead of hard-stop so the session is resumable.
   if (state.phase === "blocked") {
     const blockedResumeMessage = formatBlockedResumeMessage(state.blockers);
+    const autoResolve = await tryAutoResolveGate(ic, {
+      kind: "blocked",
+      reason: blockedResumeMessage,
+      blockers: state.blockers,
+      milestoneId: mid,
+    });
+    if (autoResolve.action === "resume") {
+      debugLog("autoLoop", { phase: "auto-resolver-resume", reason: "blocked" });
+      return { action: "continue" };
+    }
     if (s.currentUnit) {
       await deps.closeoutUnit(
         ctx,
@@ -1935,6 +2022,14 @@ export async function runGuards(
           );
           deps.sendDesktopNotification("GSD", msg, "warning", "budget", basename(s.originalBasePath || s.basePath));
           deps.logCmuxEvent(prefs, msg, "warning");
+          const autoResolve = await tryAutoResolveGate(ic, {
+            kind: "budget",
+            reason: msg,
+          });
+          if (autoResolve.action === "resume") {
+            debugLog("autoLoop", { phase: "auto-resolver-resume", reason: "budget-pause" });
+            return { action: "continue" };
+          }
           await deps.pauseAuto(ctx, pi);
           debugLog("autoLoop", { phase: "exit", reason: "budget-pause" });
           return { action: "break", reason: "budget-pause" };
@@ -1980,6 +2075,36 @@ export async function runGuards(
         "attention",
         basename(s.originalBasePath || s.basePath),
       );
+      const autoResolve = await tryAutoResolveGate(ic, {
+        kind: "context-window",
+        reason: msg,
+        runDeterministicRepairs: async () => {
+          const workspaceRoot = s.originalBasePath || s.basePath;
+          if (!s.cmdCtx || !workspaceRoot) {
+            return { fixesApplied: [], summary: "No command session available to reroot context." };
+          }
+          try {
+            const result = await s.cmdCtx.newSession({ workspaceRoot });
+            if (result.cancelled) {
+              return { fixesApplied: [], summary: "Fresh session reroot was cancelled." };
+            }
+            return {
+              fixesApplied: ["rerooted command session for context window"],
+              summary: "Fresh command session started.",
+            };
+          } catch (err) {
+            return {
+              fixesApplied: [],
+              summary: `Fresh session reroot failed: ${err instanceof Error ? err.message : String(err)}`,
+            };
+          }
+        },
+        recheckGate: async () => true,
+      });
+      if (autoResolve.action === "resume") {
+        debugLog("autoLoop", { phase: "auto-resolver-resume", reason: "context-window" });
+        return { action: "continue" };
+      }
       await deps.pauseAuto(ctx, pi);
       debugLog("autoLoop", { phase: "exit", reason: "context-window" });
       return { action: "break", reason: "context-window" };

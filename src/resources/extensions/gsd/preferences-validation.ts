@@ -397,6 +397,59 @@ export function validatePreferences(preferences: GSDPreferences): {
     }
   }
 
+  if (preferences.auto_resolve !== undefined) {
+    if (preferences.auto_resolve && typeof preferences.auto_resolve === "object") {
+      const raw = preferences.auto_resolve as Record<string, unknown>;
+      const parsed: NonNullable<GSDPreferences["auto_resolve"]> = {};
+      const startErrorCount = errors.length;
+
+      if (raw.enabled !== undefined) {
+        if (typeof raw.enabled === "boolean") parsed.enabled = raw.enabled;
+        else errors.push("auto_resolve.enabled must be a boolean");
+      }
+      if (raw.max_attempts_per_gate !== undefined) {
+        const attempts = typeof raw.max_attempts_per_gate === "number"
+          ? raw.max_attempts_per_gate
+          : Number(raw.max_attempts_per_gate);
+        if (Number.isInteger(attempts) && attempts >= 1 && attempts <= 5) {
+          parsed.max_attempts_per_gate = attempts;
+        } else {
+          errors.push("auto_resolve.max_attempts_per_gate must be an integer between 1 and 5");
+        }
+      }
+      if (raw.write_scope !== undefined) {
+        if (raw.write_scope === "state-and-config") parsed.write_scope = "state-and-config";
+        else errors.push('auto_resolve.write_scope must be "state-and-config"');
+      }
+      if (raw.include_provider !== undefined) {
+        if (typeof raw.include_provider === "boolean") parsed.include_provider = raw.include_provider;
+        else errors.push("auto_resolve.include_provider must be a boolean");
+      }
+      if (raw.include_budget_context !== undefined) {
+        if (typeof raw.include_budget_context === "boolean") parsed.include_budget_context = raw.include_budget_context;
+        else errors.push("auto_resolve.include_budget_context must be a boolean");
+      }
+
+      const knownAutoResolveKeys = new Set([
+        "enabled",
+        "max_attempts_per_gate",
+        "write_scope",
+        "include_provider",
+        "include_budget_context",
+      ]);
+      for (const key of Object.keys(raw)) {
+        if (!knownAutoResolveKeys.has(key)) {
+          warnings.push(`unknown auto_resolve key "${key}" — ignored`);
+        }
+      }
+      if (Object.keys(parsed).length > 0 && errors.length === startErrorCount) {
+        validated.auto_resolve = parsed;
+      }
+    } else {
+      errors.push("auto_resolve must be an object");
+    }
+  }
+
   // ─── Notifications ──────────────────────────────────────────────────
   if (preferences.notifications !== undefined) {
     if (preferences.notifications && typeof preferences.notifications === "object") {
