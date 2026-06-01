@@ -47,6 +47,8 @@ import { resolveSkillManifest, warnIfManifestHasMissingSkills } from "./skill-ma
 import { classifyProject, type ProjectClassification } from "./detection.js";
 import { hasBrowserRequiredText } from "./browser-evidence.js";
 import { debugLog } from "./debug-logger.js";
+import { buildRetrospectiveContext } from "./retrospective-context.js";
+import type { RetrospectiveOutcome } from "./retrospective-types.js";
 
 function resolveSliceFileFromGsdRoot(
   gsdRootPath: string,
@@ -3198,6 +3200,19 @@ export async function buildCompleteMilestonePrompt(
       extraContext: [inlinedContext],
       unitType: "complete-milestone",
     }),
+  });
+}
+
+export async function buildRetrospectMilestonePrompt(
+  mid: string,
+  base: string,
+  outcome: RetrospectiveOutcome,
+  reason?: string,
+): Promise<string> {
+  const retrospectiveContext = await buildRetrospectiveContext(mid, base, outcome, reason);
+  return loadPrompt("retrospect-milestone", {
+    milestoneId: mid,
+    retrospectiveContext,
   });
 }
 

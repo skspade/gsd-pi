@@ -146,6 +146,57 @@ export interface CreateIssueOpts {
   parentIssue?: number;
 }
 
+export interface ListedIssue {
+  number: number;
+  title: string;
+  body?: string;
+  url?: string;
+}
+
+function buildIssueListArgs(repo: string, label: string, limit: number): string[] {
+  return [
+    "issue", "list",
+    "--repo", repo,
+    "--state", "all",
+    "--label", label,
+    "--limit", String(limit),
+    "--json", "number,title,body,url",
+  ];
+}
+
+function buildLabelCreateArgs(repo: string, label: string, force: boolean): string[] {
+  const args = [
+    "label", "create", label,
+    "--repo", repo,
+    "--description", "Automatically created by GSD milestone retrospective",
+    "--color", "5319e7",
+  ];
+  if (force) args.push("--force");
+  return args;
+}
+
+export function ghBuildIssueListArgsForTest(repo: string, label: string, limit: number): string[] {
+  return buildIssueListArgs(repo, label, limit);
+}
+
+export function ghBuildLabelCreateArgsForTest(repo: string, label: string): string[] {
+  return buildLabelCreateArgs(repo, label, true);
+}
+
+export function ghListIssuesByLabel(cwd: string, repo: string, label: string, limit = 100): GhResult<ListedIssue[]> {
+  return runGhJson<ListedIssue[]>(buildIssueListArgs(repo, label, limit), cwd);
+}
+
+export function ghEnsureLabel(cwd: string, repo: string, label: string): GhResult<void> {
+  const result = runGh(buildLabelCreateArgs(repo, label, label === "gsd-auto-retro"), cwd);
+  if (!result.ok) {
+    const error = result.error ?? "";
+    if (/already exists/i.test(error)) return ok(undefined);
+    return fail(error);
+  }
+  return ok(undefined);
+}
+
 export function ghCreateIssue(cwd: string, opts: CreateIssueOpts): GhResult<number> {
   const args = [
     "issue", "create",

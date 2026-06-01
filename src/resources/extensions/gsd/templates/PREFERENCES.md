@@ -91,6 +91,11 @@ remote_questions:
 uat_dispatch:
 post_unit_hooks: []
 pre_dispatch_hooks: []
+retrospective:
+  enabled: false
+  issue_repo: skspade/gsd-pi
+  issue_label: gsd-auto-retro
+  max_issues_per_run: 10
 # language:
 # experimental:
 #   rtk: false

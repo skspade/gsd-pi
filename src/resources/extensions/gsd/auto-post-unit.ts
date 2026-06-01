@@ -96,6 +96,12 @@ import { verificationRetryKey } from "./auto/verification-retry-policy.js";
 import { getLedger } from "./metrics.js";
 import { getUnitCostSpikeAction } from "./auto-budget.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
+import { parseRetrospectiveMarkdown, resolveRetrospectivePaths } from "./retrospective-artifacts.js";
+import {
+  fileRetrospectiveIssues,
+  resolveRetrospectiveFilingConfig,
+} from "./retrospective-github.js";
+import { buildRetrospectiveSidecar, removePendingRetrospective } from "./retrospective-trigger.js";
 
 // ─── Path Comparison Helper ───────────────────────────────────────────────
 /** Compare two paths for physical identity, tolerating trailing slashes and symlinks. */
@@ -457,7 +463,8 @@ export function _shouldDispatchTriageForTest(
     !!state.currentUnit &&
     !state.currentUnit.type.startsWith("hook/") &&
     state.currentUnit.type !== "triage-captures" &&
-    state.currentUnit.type !== "quick-task";
+    state.currentUnit.type !== "quick-task" &&
+    state.currentUnit.type !== "retrospect-milestone";
 }
 
 export function _shouldDispatchQuickTaskForTest(
@@ -468,6 +475,40 @@ export function _shouldDispatchQuickTaskForTest(
     !!state.currentUnit &&
     state.currentUnit.type !== "quick-task";
 }
+
+type RemovableRetrospectiveUnit = NonNullable<AutoSession["currentUnit"]> & {
+  type: "retrospect-milestone";
+  retrospectiveOutcome: NonNullable<NonNullable<AutoSession["currentUnit"]>["retrospectiveOutcome"]>;
+};
+
+function shouldRemovePendingRetrospective(
+  currentUnit: AutoSession["currentUnit"],
+  basePath: string,
+): currentUnit is RemovableRetrospectiveUnit {
+  if (
+    currentUnit?.type !== "retrospect-milestone" ||
+    !currentUnit.retrospectiveOutcome
+  ) {
+    return false;
+  }
+  return verifyExpectedArtifact(
+    currentUnit.type,
+    currentUnit.id,
+    currentUnit.workspaceRoot ?? basePath,
+  );
+}
+
+export const _shouldRemovePendingRetrospectiveForTest = shouldRemovePendingRetrospective;
+
+function shouldRemovePendingRetrospectiveAfterFiling(
+  currentUnit: AutoSession["currentUnit"],
+  basePath: string,
+  result: { pending: number },
+): currentUnit is RemovableRetrospectiveUnit {
+  return result.pending === 0 && shouldRemovePendingRetrospective(currentUnit, basePath);
+}
+
+export const _shouldRemovePendingRetrospectiveAfterFilingForTest = shouldRemovePendingRetrospectiveAfterFiling;
 
 function isExecutionToolName(name: unknown): boolean {
   if (typeof name !== "string") return false;
@@ -2003,6 +2044,71 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
       }
     } catch (e) {
       logWarning("engine", `CODEBASE refresh failed: ${(e as Error).message}`);
+    }
+  }
+
+  if (s.currentUnit?.type === "retrospect-milestone") {
+    const paths = resolveRetrospectivePaths(s.basePath, s.currentUnit.id);
+    const content = await loadFile(paths.retro);
+    const parsed = content
+      ? parseRetrospectiveMarkdown(content)
+      : { ok: false, findings: [], error: "missing RETRO artifact" };
+    const prefs = loadEffectiveGSDPreferences(s.basePath)?.preferences;
+    const config = resolveRetrospectiveFilingConfig(prefs?.retrospective);
+
+    if (!parsed.ok) {
+      ctx.ui.notify(`Milestone retrospective skipped issue filing: ${parsed.error}`, "warning");
+      return "continue";
+    }
+
+    if (!config.enabled) {
+      ctx.ui.notify(`Milestone retrospective skipped issue filing: ${config.reason}`, "info");
+      return "continue";
+    }
+
+    const result = await fileRetrospectiveIssues({
+      basePath: s.basePath,
+      milestoneId: s.currentUnit.id,
+      outcome: s.currentUnit.retrospectiveOutcome ?? "completed",
+      reason: s.currentUnit.retrospectiveReason,
+      config,
+      findings: parsed.findings,
+    });
+    ctx.ui.notify(
+      `Milestone retrospective filed ${result.created} issue(s), left ${result.pending} pending, skipped ${result.skipped}.`,
+      "info",
+    );
+    if (shouldRemovePendingRetrospectiveAfterFiling(s.currentUnit, s.basePath, result)) {
+      removePendingRetrospective(s.originalBasePath || s.basePath, {
+        milestoneId: s.currentUnit.id,
+        outcome: s.currentUnit.retrospectiveOutcome,
+        reason: s.currentUnit.retrospectiveReason,
+      });
+    }
+    return "continue";
+  }
+
+  if (s.currentUnit?.type === "complete-milestone" && !s.stepMode) {
+    const prefs = loadEffectiveGSDPreferences(s.originalBasePath || s.basePath)?.preferences;
+    if (prefs?.retrospective?.enabled) {
+      try {
+        const { milestone: milestoneId } = parseUnitId(s.currentUnit.id);
+        if (milestoneId) {
+          await closeoutUnit(ctx, s.basePath, s.currentUnit.type, s.currentUnit.id, s.currentUnit.startedAt, buildSnapshotOpts(s.currentUnit.type, s.currentUnit.id));
+          return enqueueSidecar(
+            s,
+            ctx,
+            await buildRetrospectiveSidecar(s.basePath || s.originalBasePath, {
+              milestoneId,
+              outcome: "completed",
+            }),
+            { milestoneId, outcome: "completed" },
+            `Preparing milestone retrospective for ${milestoneId}...`,
+          );
+        }
+      } catch (e) {
+        debugLog("postUnitPostVerification", { phase: "retrospective-sidecar-enqueue-failed", error: String(e) });
+      }
     }
   }
 
