@@ -197,6 +197,12 @@ This config sets a parent workspace with two child repositories. The implicit `p
 
 - `planning_depth`: `"light"` or `"deep"` — controls project-level discovery before milestone planning. `"light"` is the default milestone discussion flow. `"deep"` runs workflow preferences, project discussion, requirements discussion, a research-decision gate, and optional project research before milestone planning. Enable it with `/gsd new-project --deep`, `/gsd new-milestone --deep`, or by setting `planning_depth: deep` in project-local `.gsd/PREFERENCES.md`. Global `~/.gsd/PREFERENCES.md` does not opt every fresh repo into deep mode. Deep mode writes `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, `.gsd/runtime/research-decision.json`, and, when research is approved, `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`.
 
+- `retrospective`: object — milestone retrospective automation. Disabled by default.
+  - `enabled`: boolean — run the retrospective agent and file issues when configured. Default: `false`.
+  - `issue_repo`: string — personal fork target for auto-created issues. Must be `skspade/gsd-pi`; `open-gsd/gsd-pi` is rejected.
+  - `issue_label`: string — primary label applied to auto-created issues. Default: `gsd-auto-retro`.
+  - `max_issues_per_run`: number — maximum issues to create from one retrospective run. Default: `10`.
+
 - `phases`: fine-grained control over which phases run. Usually set by `token_profile`, but can be overridden. Keys:
   - `skip_research`: boolean — skip milestone-level research. Default: `false`.
   - `reassess_after_slice`: boolean — run a dedicated roadmap-reassessment unit after each completed slice. Default: `false` (per ADR-003 §4). The plan-slice agent for the next slice performs JIT reassessment via a prompt preamble at zero additional token cost; a dedicated reassess session is opt-in. Set to `true` (e.g. via the `burn-max` profile) if you want the explicit session.

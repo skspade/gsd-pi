@@ -1,6 +1,11 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { ghIsAvailable, _resetGhCache } from "../cli.ts";
+import {
+  ghBuildIssueListArgsForTest,
+  ghBuildLabelCreateArgsForTest,
+  ghIsAvailable,
+  _resetGhCache,
+} from "../cli.ts";
 
 describe("github-sync/cli.ghIsAvailable", () => {
   let originalPath: string | undefined;
@@ -84,6 +89,35 @@ describe("github-sync/cli.ghIsAvailable", () => {
     assert.ok(
       typeof afterReset === "boolean",
       "re-probe must return a boolean",
+    );
+  });
+});
+
+describe("github-sync/cli exported helper args", () => {
+  it("builds issue-list args for a label query", () => {
+    assert.deepEqual(
+      ghBuildIssueListArgsForTest("skspade/gsd-pi", "gsd-auto-retro", 100),
+      [
+        "issue", "list",
+        "--repo", "skspade/gsd-pi",
+        "--state", "all",
+        "--label", "gsd-auto-retro",
+        "--limit", "100",
+        "--json", "number,title,body,url",
+      ],
+    );
+  });
+
+  it("builds forced label-create args for retrospective filing", () => {
+    assert.deepEqual(
+      ghBuildLabelCreateArgsForTest("skspade/gsd-pi", "gsd-auto-retro"),
+      [
+        "label", "create", "gsd-auto-retro",
+        "--repo", "skspade/gsd-pi",
+        "--description", "Automatically created by GSD milestone retrospective",
+        "--color", "5319e7",
+        "--force",
+      ],
     );
   });
 });

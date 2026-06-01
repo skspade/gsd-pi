@@ -592,6 +592,7 @@ test("decideDispatchNodeKind maps sidecar kinds before unit types", () => {
   assert.equal(decideDispatchNodeKind("execute-task", "hook"), "hook");
   assert.equal(decideDispatchNodeKind("execute-task", "triage"), "verification");
   assert.equal(decideDispatchNodeKind("execute-task", "doctor-heal"), "verification");
+  assert.equal(decideDispatchNodeKind("execute-task", "retrospective"), "verification");
   assert.equal(decideDispatchNodeKind("execute-task", "quick-task"), "team-worker");
 });
 

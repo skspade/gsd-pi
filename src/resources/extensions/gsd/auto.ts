@@ -199,6 +199,10 @@ import { emitJournalEvent as _emitJournalEvent, type JournalEntry } from "./jour
 import { isClosedStatus } from "./status-guards.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import {
+  classifyRetrospectiveOutcomeFromStopReason,
+  recordPendingRetrospective,
+} from "./retrospective-trigger.js";
+import {
   type AutoDashboardData,
   updateProgressWidget as _updateProgressWidget,
   setCompletionProgressWidget,
@@ -790,6 +794,28 @@ export function isAutoCompletionStopInProgress(): boolean {
   return s.completionStopInProgress;
 }
 
+function recordPendingRetrospectiveForCurrentMilestone(reason: string | undefined): void {
+  const basePath = s.originalBasePath || s.basePath;
+  if (!basePath || !s.currentMilestoneId) return;
+  if (s.currentUnit?.type === "retrospect-milestone") return;
+
+  try {
+    const prefs = loadEffectiveGSDPreferences(basePath)?.preferences;
+    if (!prefs?.retrospective?.enabled) return;
+
+    recordPendingRetrospective(basePath, {
+      milestoneId: s.currentMilestoneId,
+      outcome: classifyRetrospectiveOutcomeFromStopReason(reason),
+      reason,
+    });
+  } catch (err) {
+    debugLog("retrospective-trigger", {
+      phase: "stop-record-failed",
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 /** Test-only seam for validating auto-mode guards (#4704). Do not use in production code. */
 export function _setAutoActiveForTest(active: boolean): void {
   s.active = active;
@@ -1376,6 +1402,9 @@ export async function stopAuto(
   const installCompletionWidget = completionStopRequested;
   const preserveCompletionSurface = completionStopRequested;
   s.completionStopInProgress = preserveCompletionSurface;
+  if (!completionStopRequested) {
+    recordPendingRetrospectiveForCurrentMilestone(reason);
+  }
 
   // #4764 — telemetry: record the exit reason, isolation mode, whether an auto
   // worktree was active, and whether the current milestone was merged before

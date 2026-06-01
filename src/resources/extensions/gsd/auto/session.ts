@@ -28,6 +28,7 @@ import { resolveWorktreeProjectRoot } from "../worktree-root.js";
 import { normalizeRealPath } from "../paths.js";
 import type { MilestoneScope } from "../workspace.js";
 import type { RootDirtySnapshot } from "../root-write-leak-guard.js";
+import type { RetrospectiveOutcome } from "../retrospective-types.js";
 
 // ─── Exported Types ──────────────────────────────────────────────────────────
 
@@ -36,6 +37,8 @@ export interface CurrentUnit {
   id: string;
   startedAt: number;
   workspaceRoot?: string;
+  retrospectiveOutcome?: RetrospectiveOutcome;
+  retrospectiveReason?: string;
 }
 
 export interface UnitRouting {
@@ -72,7 +75,7 @@ export interface PendingOrchestrationDispatch {
  * hooks, triage, quick-tasks, and doctor-heal recovery.
  */
 export interface SidecarItem {
-  kind: "hook" | "triage" | "quick-task" | "doctor-heal";
+  kind: "hook" | "triage" | "quick-task" | "doctor-heal" | "retrospective";
   unitType: string;
   unitId: string;
   prompt: string;
@@ -80,6 +83,8 @@ export interface SidecarItem {
   model?: string;
   /** Capture ID for quick-task items (already marked executed at enqueue time). */
   captureId?: string;
+  retrospectiveOutcome?: RetrospectiveOutcome;
+  retrospectiveReason?: string;
 }
 
 export interface PreExecFailure {

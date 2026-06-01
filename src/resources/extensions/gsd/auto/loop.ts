@@ -106,6 +106,10 @@ import {
 import { handleCustomEngineReconcile } from "./workflow-custom-engine-reconcile.js";
 import { handleCustomEngineReconcileOutcome } from "./workflow-custom-engine-reconcile-outcome.js";
 import { formatLeaseConflictNotice } from "./lease-conflict-notice.js";
+import {
+  buildRetrospectiveSidecar,
+  readPendingRetrospectives,
+} from "../retrospective-trigger.js";
 
 /**
  * Returns true if workerId is an active worker in this project whose OS
@@ -528,6 +532,29 @@ export async function autoLoop(
       // ── Blanket try/catch: one bad iteration must not kill the session
       const prefs = deps.loadEffectiveGSDPreferences()?.preferences;
       const uokFlags = resolveUokFlags(prefs);
+
+      if (prefs?.retrospective?.enabled && s.sidecarQueue.length === 0) {
+        const retrospectiveStoreBasePath = s.originalBasePath || s.basePath;
+        const retrospectivePromptBasePath = s.basePath || retrospectiveStoreBasePath;
+        try {
+          const pendingRetrospectives = readPendingRetrospectives(retrospectiveStoreBasePath);
+          if (pendingRetrospectives.length > 0) {
+            const sidecars = await Promise.all(
+              pendingRetrospectives.map((entry) => buildRetrospectiveSidecar(retrospectivePromptBasePath, entry)),
+            );
+            s.sidecarQueue.push(...sidecars);
+            debugLog("autoLoop", {
+              phase: "pending-retrospectives-drained",
+              count: sidecars.length,
+            });
+          }
+        } catch (err) {
+          debugLog("autoLoop", {
+            phase: "pending-retrospectives-drain-failed",
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
 
       // ── Check sidecar queue before deriveState ──
       // NOTE: Sidecar dequeue MUST run before validateWorkflowSessionLock so a

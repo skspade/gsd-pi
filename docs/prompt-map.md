@@ -231,6 +231,9 @@ reassess-roadmap  (after each slice)
          │
          ▼
 complete-milestone
+         │
+         ▼
+retrospect-milestone  (best-effort auto-retro issue filing)
 ```
 
 | Prompt | Purpose | Key Tools Called |
@@ -238,6 +241,7 @@ complete-milestone
 | `complete-slice.md` | Close slice after tasks pass. Compress summary. | `gsd_slice_complete`, `gsd_requirement_update` |
 | `reassess-roadmap.md` | Review roadmap post-slice. Validates success-criterion coverage. | `gsd_reassess_roadmap`, `gsd_requirement_update` |
 | `complete-milestone.md` | Close milestone. Persist to DB. | `gsd_complete_milestone`, `gsd_requirement_update`, `capture_thought` |
+| `retrospect-milestone.md` | Analyze milestone run friction and write `M##-RETRO.md`; deterministic TypeScript files one labeled issue per finding. | writes `M##-RETRO.md`, then GitHub filing code |
 
 ### 5g. Maintenance & Repair
 
@@ -395,6 +399,8 @@ complete-slice               →  .gsd/milestones/M##/slices/S##/S##-SUMMARY.md
 reassess-roadmap             →  updates M##-ROADMAP.md (slice statuses)
 validate-milestone           →  validation verdict (DB)
 complete-milestone           →  .gsd/milestones/M##/M##-SUMMARY.md
+retrospect-milestone         →  .gsd/milestones/M##/M##-RETRO.md
+                                 .gsd/milestones/M##/M##-RETRO-ISSUES.json
 
 triage-captures              →  .gsd/CAPTURES.md (classification metadata)
 queue                        →  .gsd/QUEUE.md, updates PROJECT.md

@@ -169,6 +169,9 @@ export function resolveExpectedArtifactPath(
     case "complete-milestone": {
       return resolveMilestoneArtifactPath(base, mid, "SUMMARY");
     }
+    case "retrospect-milestone": {
+      return resolveMilestoneArtifactPath(base, mid, "RETRO");
+    }
     case "replan-slice": {
       return resolveSliceArtifactPath(base, mid, sid!, "REPLAN");
     }
@@ -237,6 +240,8 @@ export function diagnoseExpectedArtifact(
       return `${relMilestoneFile(base, mid, "VALIDATION")} (milestone validation report)`;
     case "complete-milestone":
       return `${relMilestoneFile(base, mid, "SUMMARY")} (milestone summary)`;
+    case "retrospect-milestone":
+      return `${relMilestoneFile(base, mid, "RETRO")} (milestone retrospective with fenced JSON findings)`;
     default:
       return null;
   }
