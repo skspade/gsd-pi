@@ -122,6 +122,32 @@ If both files exist, server names are merged and the first definition found wins
 }
 ```
 
+### Example: gsd-browser MCP server
+
+Use `gsd-browser` when GSD or an external MCP client needs deterministic browser automation, versioned element refs, assertions, screenshots, visual diffs, recordings, or a live human takeover viewer.
+
+Install the companion CLI first:
+
+```bash
+npm install -g @opengsd/gsd-browser
+```
+
+Then add a local MCP server entry:
+
+```json
+{
+  "mcpServers": {
+    "gsd-browser": {
+      "type": "stdio",
+      "command": "gsd-browser",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Keep this in `.gsd/mcp.json` when browser paths, vault settings, or session state are machine-local. Use `.mcp.json` only when the team should share the same server entry.
+
 ### Example: HTTP server
 
 ```json
@@ -234,6 +260,7 @@ With this configuration, a Haiku-4-5 subagent sees only `gsd-workflow` and `goog
 | `GSD_ALLOWED_COMMAND_PREFIXES` | (built-in list) | Comma-separated command prefixes allowed for `!command` value resolution. Overrides `allowedCommandPrefixes` in settings.json. See [Custom Models — Command Allowlist](custom-models.md#command-allowlist). |
 | `GSD_FETCH_ALLOWED_URLS` | (none) | Comma-separated hostnames exempted from `fetch_page` URL blocking. Overrides `fetchAllowedUrls` in settings.json. See [URL Blocking](#url-blocking-fetch_page). |
 | `PI_DISABLE_SYNC_OUTPUT` | (unset) | Set to literal `1` to disable synchronized terminal output mode in the TUI on non-Windows platforms. By default synchronized output is enabled on macOS/Linux and always disabled on Windows. |
+| `PI_TUI_MOUSE` | (unset) | Set to literal `1` to enable terminal mouse reporting for TUI clicks and wheel events. Native drag selection is preserved by default; when mouse reporting is enabled, most terminals require Shift+drag to select text. |
 | `PI_TOKEN_TELEMETRY` | (unset) | Set to literal `1` to emit opt-in per-call token telemetry as JSONL on stderr. Other values are ignored. |
 
 ### Token Telemetry
@@ -809,12 +836,17 @@ Control what notifications GSD sends during auto mode:
 ```yaml
 notifications:
   enabled: true
+  local_bell: false           # play terminal bell on questions and auto-mode stops
   on_complete: true           # notify on unit completion
   on_error: true              # notify on errors
   on_budget: true             # notify on budget thresholds
   on_milestone: true          # notify when milestone finishes
   on_attention: true          # notify when manual attention needed
 ```
+
+Set `local_bell: true` to play the local terminal bell when `ask_user_questions`
+needs an answer or auto-mode stops. The bell respects `enabled` and
+`on_attention`.
 
 **macOS delivery:** GSD uses [`terminal-notifier`](https://github.com/julienXX/terminal-notifier) when available, falling back to `osascript`. We recommend installing `terminal-notifier` for reliable notification delivery:
 
@@ -1116,6 +1148,7 @@ notifications:
   on_complete: false
   on_milestone: true
   on_attention: true
+  local_bell: false
 
 # Visualizer
 auto_visualize: true

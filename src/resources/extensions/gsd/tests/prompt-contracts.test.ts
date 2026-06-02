@@ -32,6 +32,16 @@ test("run-uat prompt branches on dynamic UAT mode and supports runtime evidence"
   assert.doesNotMatch(prompt, /uatType:\s*artifact-driven/);
 });
 
+test("run-uat prompt lists canonical gsd_uat_exec intent values", () => {
+  const prompt = readPrompt("run-uat");
+  assert.match(prompt, /`uat-artifact-check`/);
+  assert.match(prompt, /`uat-runtime-check`/);
+  assert.match(prompt, /`uat-browser-check`/);
+  assert.match(prompt, /`uat-service-start`/);
+  assert.match(prompt, /`uat-log-inspection`/);
+  assert.match(prompt, /do not use `artifact`, `runtime`, or `human-follow-up` as `intent`/i);
+});
+
 test("workflow-start prompt defaults to autonomy instead of per-phase confirmation", () => {
   const prompt = readPrompt("workflow-start");
   assert.match(prompt, /Keep moving by default/i);
@@ -209,6 +219,14 @@ test("execute-task prompt uses gsd_task_complete as canonical summary write path
   assert.match(prompt, /DB-backed tool is the canonical write path/i);
   assert.match(prompt, /Do \*\*not\*\* manually write `?\{\{taskSummaryPath\}\}`?/i);
   assert.doesNotMatch(prompt, /^\d+\.\s+Write `?\{\{taskSummaryPath\}\}`?\s*$/m);
+});
+
+test("execute-task prompt forbids phase escalation tools and native Workflow", () => {
+  const prompt = readPrompt("execute-task");
+  assert.match(prompt, /Complete only `\{\{taskId\}\}`/);
+  assert.match(prompt, /Do NOT call `gsd_slice_complete`, `gsd_validate_milestone`, `gsd_complete_milestone`/);
+  assert.match(prompt, /spawn `Workflow`/);
+  assert.match(prompt, /orchestrator owns slice\/milestone closure and phase transitions/i);
 });
 
 test("execute-task prompt does not instruct LLM to toggle checkboxes manually", () => {

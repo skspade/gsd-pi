@@ -212,6 +212,7 @@ export async function handleVerdict(
       remediationPlan: current.remediationPlan,
     },
     basePath,
+    parsed.verdict === "pass" ? { skipBrowserEvidenceGate: true } : undefined,
   );
 
   if (result.isError) {
@@ -237,7 +238,7 @@ export async function handleVerdict(
 
   if (effectiveVerdict === "needs-remediation") {
     ctx.ui.notify(
-      "Follow up with gsd_reassess_roadmap to add remediation slices, then re-run /gsd auto.",
+      "Follow up with /gsd dispatch reassess to add remediation slices, then re-run /gsd auto.",
       "info",
     );
   }

@@ -27,7 +27,7 @@ You are the UAT runner. Execute every check defined in `{{uatPath}}` as deeply a
 ### Automation rules by mode
 
 - `artifact-driven` — verify with shell commands, scripts, file reads, and artifact structure checks.
-- `browser-executable` — use browser tools to navigate to the target URL and verify expected behavior. Capture screenshots as evidence. Record pass/fail with specific assertions.
+- `browser-executable` — use gsd-browser tools to navigate to the target URL and verify expected behavior. Prefer `mcp__gsd-browser__browser_*` tools when namespaced, or direct `browser_*` tools when surfaced without a namespace. Capture screenshots as evidence. Record pass/fail with specific assertions.
 - `runtime-executable` — execute the specified command or script. Capture stdout/stderr as evidence. Record pass/fail based on exit code and output.
 - `live-runtime` — exercise the real runtime path. Start or connect to the app/service if needed, use browser/runtime/network checks, and verify observable behavior.
 - `mixed` — run all automatable artifact-driven and live-runtime checks. Separate any remaining human-only checks explicitly.
@@ -37,18 +37,24 @@ You are the UAT runner. Execute every check defined in `{{uatPath}}` as deeply a
 
 Choose the lightest tool that proves the check honestly:
 
-- Run shell commands with `bash`
+- Run automated checks with `gsd_uat_exec`
+  - Use `uat-artifact-check` as `intent` for static file, grep, structure, or artifact checks.
+  - Use `uat-runtime-check` as `intent` for executing tests, scripts, or runtime assertions.
+  - Use `uat-browser-check` as `intent` for browser interaction or screenshot-backed UI checks.
+  - Use `uat-service-start` as `intent` only when starting or connecting to an app/service.
+  - Use `uat-log-inspection` as `intent` for checking logs or captured output files.
+  - The result-table evidence mode is separate; do not use `artifact`, `runtime`, or `human-follow-up` as `intent`.
 - Run `grep` / `rg` checks against files
 - Run `node` / other script invocations
 - Read files and verify their contents
 - Check that expected artifacts exist and have correct structure
-- For live/runtime/UI checks, exercise the real flow in the browser when applicable and inspect runtime/network/console state
+- For live/runtime/UI checks, exercise the real flow with gsd-browser when applicable and inspect runtime/network/console state
 - When a check cannot be honestly automated, gather the best objective evidence you can and mark it `NEEDS-HUMAN`
 
 For each check, record:
 - The check description (from the UAT file)
 - The evidence mode used: `artifact`, `runtime`, or `human-follow-up`
-- The command or action taken
+- The command or action taken, including the `gsd_uat_exec` evidence ID for automated checks
 - The actual result observed
 - `PASS`, `FAIL`, or `NEEDS-HUMAN`
 
@@ -57,7 +63,7 @@ After running all checks, compute the **overall verdict**:
 - `FAIL` — one or more automatable checks failed
 - `PARTIAL` — one or more automatable checks were skipped or returned inconclusive results (not the same as `NEEDS-HUMAN` — use PARTIAL only when the agent itself could not determine pass/fail for a check it was supposed to automate)
 
-Call `gsd_summary_save` with `milestone_id: {{milestoneId}}`, `slice_id: {{sliceId}}`, `artifact_type: "ASSESSMENT"`, and the full UAT result markdown as `content` — the tool computes the file path and persists to both DB and disk. The content should follow this format:
+Call `gsd_summary_save` with `milestone_id: "{{milestoneId}}"`, `slice_id: "{{sliceId}}"`, `artifact_type: "ASSESSMENT"`, and the full UAT result markdown as `content`. The tool computes the assessment path, persists to DB/disk, and saves the aggregate UAT gate. The content should follow this logical shape:
 
 ```markdown
 ---
@@ -86,6 +92,6 @@ date: <ISO 8601 timestamp>
 
 ---
 
-**You MUST call `gsd_summary_save` with the UAT result content before finishing.**
+**You MUST call `gsd_summary_save` with `artifact_type: "ASSESSMENT"` and the UAT result content before finishing. Do not write the assessment file directly.**
 
 When done, say: "UAT {{sliceId}} complete."

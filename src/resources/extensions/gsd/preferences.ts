@@ -329,7 +329,7 @@ function parseFrontmatterBlock(frontmatter: string): GSDPreferences {
     if (typeof parsed !== 'object' || parsed === null) {
       return {} as GSDPreferences;
     }
-    return parsed as GSDPreferences;
+    return normalizeParsedPreferences(parsed as GSDPreferences);
   } catch (e) {
     // Warn at most once per session to avoid flooding TUI (#3376)
     if (!_warnedFrontmatterParse) {
@@ -338,6 +338,23 @@ function parseFrontmatterBlock(frontmatter: string): GSDPreferences {
     }
     return {} as GSDPreferences;
   }
+}
+
+function normalizeParsedPreferences(preferences: GSDPreferences): GSDPreferences {
+  const remoteQuestions = preferences.remote_questions;
+  if (remoteQuestions && typeof remoteQuestions === "object" && typeof remoteQuestions.channel_id === "number") {
+    const rawChannelId = remoteQuestions.channel_id;
+    const normalizedChannelId =
+      Number.isSafeInteger(rawChannelId) ? String(rawChannelId) : rawChannelId;
+    return {
+      ...preferences,
+      remote_questions: {
+        ...remoteQuestions,
+        channel_id: normalizedChannelId,
+      },
+    };
+  }
+  return preferences;
 }
 
 /**
@@ -402,7 +419,7 @@ function parseHeadingListFormat(content: string): GSDPreferences {
     }
   }
 
-  return typed as GSDPreferences;
+  return normalizeParsedPreferences(typed as GSDPreferences);
 }
 
 // ─── Merging ────────────────────────────────────────────────────────────────
@@ -587,9 +604,14 @@ function mergePreDispatchHooks(
 
 // ─── System Prompt Rendering ──────────────────────────────────────────────────
 
-export function renderPreferencesForSystemPrompt(preferences: GSDPreferences, resolutions?: Map<string, SkillResolution>): string {
+export function renderPreferencesForSystemPrompt(
+  preferences: GSDPreferences,
+  resolutions?: Map<string, SkillResolution>,
+  options?: { includeResolvedPaths?: boolean },
+): string {
   const validated = validatePreferences(preferences);
   const lines: string[] = ["## GSD Skill Preferences"];
+  const includeResolvedPaths = options?.includeResolvedPaths ?? true;
 
   if (validated.errors.length > 0) {
     lines.push("- Validation: some preference values were ignored because they were invalid.");
@@ -606,7 +628,17 @@ export function renderPreferencesForSystemPrompt(preferences: GSDPreferences, re
     "- Current user instructions still override these defaults.",
   );
 
-  const fmt = (ref: string) => resolutions ? formatSkillRef(ref, resolutions) : ref;
+  const fmt = (ref: string) => {
+    if (!resolutions) return ref;
+    if (!includeResolvedPaths) {
+      const resolution = resolutions.get(ref);
+      if (!resolution || resolution.method === "unresolved") {
+        return `${ref} (⚠ not found — check skill name or path)`;
+      }
+      return ref;
+    }
+    return formatSkillRef(ref, resolutions);
+  };
 
   if (preferences.always_use_skills && preferences.always_use_skills.length > 0) {
     lines.push("- Always use these skills when relevant:");

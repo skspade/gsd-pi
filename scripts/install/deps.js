@@ -164,6 +164,16 @@ function execCommand(command, opts = {}) {
  * to materialize the real packages without re-running lifecycle scripts.
  */
 export async function repairPackageDependencies(packageRoot, { ui, quiet = false } = {}) {
+  if (
+    process.env.GSD_SKIP_DEP_REPAIR === '1' ||
+    process.env.GSD_SKIP_DEP_REPAIR === 'true'
+  ) {
+    if (!quiet) {
+      ui?.skip?.('Dependencies', 'skipped by GSD_SKIP_DEP_REPAIR')
+    }
+    return
+  }
+
   const pkgJson = join(packageRoot, 'package.json')
   if (!existsSync(pkgJson)) return
 

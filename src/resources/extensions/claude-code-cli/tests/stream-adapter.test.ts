@@ -1,7 +1,7 @@
 // gsd-pi - Claude Code stream adapter regression tests
 import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -12,6 +12,7 @@ import {
 	makeAbortedMessage,
 	mergePendingToolCalls,
 	buildFinalAssistantContent,
+	handleClaudeCodePartialStreamEvent,
 	resolveClaudePermissionMode,
 	buildPromptFromContext,
 	buildSdkQueryPrompt,
@@ -32,6 +33,8 @@ import {
 	resolveBundledClaudeCliPath,
 	normalizeClaudePathForSdk,
 	roundResultToElicitationContent,
+	autoInitClaudeCodeWorkflowMcp,
+	inferGsdPhaseFromContext,
 } from "../stream-adapter.ts";
 import type { AssistantMessage, Context, Message } from "@gsd/pi-ai";
 import type { SDKUserMessage } from "../sdk-types.ts";
@@ -156,6 +159,40 @@ describe("stream-adapter — result error text (#3776)", () => {
 		});
 
 		assert.equal(message, "claude_code_request_failed");
+	});
+});
+
+describe("stream-adapter — Claude Code internal sub-turns (#337)", () => {
+	test("repeated SDK message_start events keep one growing partial message", () => {
+		let builder: Parameters<typeof handleClaudeCodePartialStreamEvent>[0] = null;
+		const contentLengths: number[] = [];
+
+		for (const event of [
+			{ type: "message_start", message: { model: "claude-opus-4-8" } },
+			{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+			{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "First internal turn." } },
+			{ type: "content_block_stop", index: 0 },
+			{ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+			{ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Still same SDK message." } },
+			{ type: "content_block_stop", index: 1 },
+			{ type: "message_start", message: { model: "claude-opus-4-8" } },
+			{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+			{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Second internal turn." } },
+			{ type: "content_block_stop", index: 0 },
+		]) {
+			const result = handleClaudeCodePartialStreamEvent(builder, event as any, "claude-opus-4-8");
+			builder = result.builder;
+			if (result.assistantEvent && "partial" in result.assistantEvent) {
+				contentLengths.push(result.assistantEvent.partial.content.length);
+			}
+		}
+
+		assert.ok(builder);
+		assert.deepEqual(
+			builder.message.content.map((block: any) => block.text),
+			["First internal turn.", "Still same SDK message.", "Second internal turn."],
+		);
+		assert.deepEqual(contentLengths, [1, 1, 1, 2, 2, 2, 3, 3, 3]);
 	});
 });
 
@@ -406,6 +443,61 @@ describe("stream-adapter — no transcript fabrication (#4102)", () => {
 		const context: Context = { messages: [] };
 		const prompt = buildPromptFromContext(context);
 		assert.equal(prompt, "", "empty context must not emit a bare directive");
+	});
+
+	test("buildPromptFromContext uses the active workflow MCP server name", () => {
+		const context: Context = {
+			messages: [{ role: "user", content: "Check status" } as Message],
+		};
+
+		const prompt = buildPromptFromContext(context, { workflowMcpServerName: "custom-workflow" });
+
+		assert.ok(prompt.includes("mcp__custom-workflow__<tool_name>"));
+		assert.ok(prompt.includes("mcp__custom-workflow__gsd_exec"));
+		assert.ok(!prompt.includes("mcp__gsd-workflow__<tool_name>"));
+	});
+
+	test("buildPromptFromContext does not advertise workflow MCP tools when unavailable", () => {
+		const context: Context = {
+			messages: [{ role: "user", content: "Check status" } as Message],
+		};
+
+		const prompt = buildPromptFromContext(context);
+
+		assert.ok(prompt.includes("GSD workflow MCP tools are unavailable"));
+		assert.ok(!prompt.includes("mcp__gsd-workflow__<tool_name>"));
+		assert.ok(!prompt.includes("mcp__gsd-workflow__gsd_exec"));
+	});
+
+	test("buildPromptFromContext remaps pi-native browser tools for Claude Code", () => {
+		const context: Context = {
+			systemPrompt: "Browser verification: use browser_find and browser_navigate.",
+			messages: [{ role: "user", content: "Verify the app" } as Message],
+		};
+
+		const prompt = buildPromptFromContext(context, { workflowMcpServerName: "gsd-workflow" });
+
+		assert.ok(prompt.includes("browser_navigate"), "remap should name stale browser tool examples");
+		assert.ok(prompt.includes("not Claude Code tools"), "remap should explain browser_* is unavailable in Claude Code");
+		assert.ok(prompt.includes("Never use ToolSearch to select browser_* tools"));
+		assert.ok(prompt.includes("Bash to run a local Playwright/Node check"));
+	});
+
+	test("buildPromptFromContext advertises gsd-browser MCP when available", () => {
+		const context: Context = {
+			systemPrompt: "Browser verification: use browser_find and browser_navigate.",
+			messages: [{ role: "user", content: "Verify the app" } as Message],
+		};
+
+		const prompt = buildPromptFromContext(context, {
+			workflowMcpServerName: "gsd-workflow",
+			browserMcpServerName: "gsd-browser",
+		});
+
+		assert.ok(prompt.includes("Browser verification uses gsd-browser MCP by default"));
+		assert.ok(prompt.includes("mcp__gsd-browser__browser_snapshot_refs"));
+		assert.ok(prompt.includes("mcp__gsd-browser__browser_assert"));
+		assert.ok(!prompt.includes("Bash to run a local Playwright/Node check"));
 	});
 });
 
@@ -737,6 +829,11 @@ describe("stream-adapter — session persistence (#2859)", () => {
 		assert.equal(options.persistSession, true, "persistSession must default to true");
 	});
 
+	test("buildSdkOptions loads project and local settings so approved .mcp.json servers are active", () => {
+		const options = buildSdkOptions("claude-sonnet-4-20250514", "test prompt");
+		assert.deepEqual(options.settingSources, ["project", "local"]);
+	});
+
 	test("buildSdkOptions sets model and prompt correctly", () => {
 		const options = buildSdkOptions("claude-sonnet-4-20250514", "hello world");
 		assert.equal(options.model, "claude-sonnet-4-20250514");
@@ -769,6 +866,29 @@ describe("stream-adapter — session persistence (#2859)", () => {
 		} finally {
 			restore();
 			rmSync(explicitCwd, { recursive: true, force: true });
+		}
+	});
+
+	test("autoInitClaudeCodeWorkflowMcp writes and approves project GSD MCP config", () => {
+		const projectRoot = realpathSync(mkdtempSync(join(tmpdir(), "claude-sdk-auto-init-")));
+		const restore = setWorkflowMcpEnv({
+			GSD_WORKFLOW_MCP_COMMAND: "node",
+			GSD_WORKFLOW_MCP_NAME: "gsd-workflow",
+			GSD_WORKFLOW_MCP_ARGS: JSON.stringify(["server.js"]),
+			GSD_WORKFLOW_MCP_CWD: projectRoot,
+		});
+
+		try {
+			autoInitClaudeCodeWorkflowMcp(projectRoot);
+			assert.equal(existsSync(join(projectRoot, ".mcp.json")), true);
+
+			const settings = JSON.parse(readFileSync(join(projectRoot, ".claude", "settings.local.json"), "utf-8")) as {
+				enabledMcpjsonServers?: string[];
+			};
+			assert.deepEqual(settings.enabledMcpjsonServers, ["gsd-workflow", "gsd-browser"]);
+		} finally {
+			restore();
+			rmSync(projectRoot, { recursive: true, force: true });
 		}
 	});
 
@@ -927,6 +1047,7 @@ describe("stream-adapter — session persistence (#2859)", () => {
 			const options = buildSdkOptions("claude-sonnet-4-20250514", "test");
 			const mcpServers = options.mcpServers as Record<string, any>;
 			assert.ok(mcpServers?.["gsd-workflow"], "expected gsd-workflow server config");
+			assert.ok(mcpServers?.["gsd-browser"], "expected gsd-browser server config");
 			const srv = mcpServers["gsd-workflow"];
 			assert.equal(srv.command, "node");
 			assert.deepEqual(srv.args, ["packages/mcp-server/dist/cli.js"]);
@@ -934,7 +1055,7 @@ describe("stream-adapter — session persistence (#2859)", () => {
 			assert.equal(srv.env.GSD_CLI_PATH, "/tmp/gsd");
 			assert.equal(srv.env.GSD_PERSIST_WRITE_GATE_STATE, "1");
 			assert.equal(srv.env.GSD_WORKFLOW_PROJECT_ROOT, "/tmp/project");
-			assert.deepEqual(options.disallowedTools, ["AskUserQuestion"]);
+			assert.deepEqual(options.disallowedTools, ["ToolSearch", "AskUserQuestion"]);
 			assert.deepEqual(options.allowedTools, [
 				"Read",
 				"Write",
@@ -946,12 +1067,110 @@ describe("stream-adapter — session persistence (#2859)", () => {
 				"WebFetch",
 				"WebSearch",
 				"mcp__gsd-workflow__*",
+				"mcp__gsd-browser__*",
 			]);
 		} finally {
 			process.chdir(originalCwd);
 			rmSync(emptyDir, { recursive: true, force: true });
 			restore();
 		}
+	});
+
+	test("buildSdkOptions scopes run-uat to exact workflow MCP tools", () => {
+		const restore = setWorkflowMcpEnv({
+			GSD_WORKFLOW_MCP_COMMAND: "node",
+			GSD_WORKFLOW_MCP_NAME: "gsd-workflow",
+			GSD_WORKFLOW_MCP_ARGS: JSON.stringify(["packages/mcp-server/dist/cli.js"]),
+			GSD_WORKFLOW_MCP_ENV: JSON.stringify({ GSD_CLI_PATH: "/tmp/gsd" }),
+			GSD_WORKFLOW_MCP_CWD: "/tmp/project",
+		});
+		const originalCwd = process.cwd();
+		const emptyDir = mkdtempSync(join(tmpdir(), "claude-mcp-uat-"));
+		try {
+			process.chdir(emptyDir);
+			const options = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, { gsdPhase: "run-uat" });
+			const allowedTools = options.allowedTools as string[];
+			const disallowedTools = options.disallowedTools as string[];
+
+			assert.deepEqual(allowedTools, [
+				"Read",
+				"Glob",
+				"Grep",
+				"mcp__gsd-workflow__gsd_uat_exec",
+				"mcp__gsd-workflow__gsd_uat_result_save",
+				"mcp__gsd-workflow__gsd_resume",
+				"mcp__gsd-workflow__gsd_milestone_status",
+				"mcp__gsd-workflow__gsd_journal_query",
+				"mcp__gsd-browser__*",
+			]);
+			assert.ok(!allowedTools.includes("Bash"));
+			assert.ok(!allowedTools.includes("Write"));
+			assert.ok(!allowedTools.includes("Edit"));
+			assert.ok(!allowedTools.includes("WebSearch"));
+			assert.ok(!allowedTools.includes("mcp__gsd-workflow__*"));
+			assert.ok(disallowedTools.includes("Bash"));
+			assert.ok(disallowedTools.includes("Write"));
+			assert.ok(disallowedTools.includes("Edit"));
+			assert.ok(disallowedTools.includes("WebSearch"));
+			assert.ok(disallowedTools.includes("mcp__gsd-workflow__gsd_exec"));
+			assert.ok(disallowedTools.includes("mcp__gsd-workflow__gsd_summary_save"));
+			assert.ok(disallowedTools.includes("mcp__gsd-workflow__gsd_save_gate_result"));
+			assert.equal(options.strictMcpConfig, true);
+			assert.deepEqual(options.settingSources, []);
+			assert.ok((options.mcpServers as Record<string, unknown>)?.["gsd-workflow"]);
+			assert.ok((options.mcpServers as Record<string, unknown>)?.["gsd-browser"]);
+		} finally {
+			process.chdir(originalCwd);
+			rmSync(emptyDir, { recursive: true, force: true });
+			restore();
+		}
+	});
+
+	test("buildSdkOptions presents exact required workflow MCP tools for non-UAT GSD phases", () => {
+		const restore = setWorkflowMcpEnv({
+			GSD_WORKFLOW_MCP_COMMAND: "node",
+			GSD_WORKFLOW_MCP_NAME: "gsd-workflow",
+			GSD_WORKFLOW_MCP_ARGS: JSON.stringify(["packages/mcp-server/dist/cli.js"]),
+			GSD_WORKFLOW_MCP_ENV: JSON.stringify({ GSD_CLI_PATH: "/tmp/gsd" }),
+			GSD_WORKFLOW_MCP_CWD: "/tmp/project",
+		});
+		const originalCwd = process.cwd();
+		const emptyDir = mkdtempSync(join(tmpdir(), "claude-mcp-plan-"));
+		try {
+			process.chdir(emptyDir);
+			const options = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, { gsdPhase: "plan-milestone" });
+			const allowedTools = options.allowedTools as string[];
+
+			assert.ok(
+				allowedTools.includes("mcp__gsd-workflow__gsd_plan_milestone"),
+				"plan-milestone must expose exact planning tool",
+			);
+			assert.ok(
+				allowedTools.includes("mcp__gsd-workflow__gsd_milestone_status"),
+				"plan-milestone must expose exact milestone status helper before ToolSearch is needed",
+			);
+			assert.ok(
+				allowedTools.includes("mcp__gsd-workflow__*"),
+				"non-UAT workflow phases keep the wildcard for existing broad workflow behavior",
+			);
+			assert.ok((options.disallowedTools as string[]).includes("AskUserQuestion"));
+			assert.equal(options.strictMcpConfig, true);
+			assert.ok((options.mcpServers as Record<string, unknown>)?.["gsd-workflow"]);
+		} finally {
+			process.chdir(originalCwd);
+			rmSync(emptyDir, { recursive: true, force: true });
+			restore();
+		}
+	});
+
+	test("inferGsdPhaseFromContext recognizes non-UAT unit prompts", () => {
+		const context = {
+			messages: [
+				{ role: "user", content: "## UNIT: Plan Milestone M002 (\"Plan by Priority\")" },
+			],
+		} as Context;
+
+		assert.equal(inferGsdPhaseFromContext(context), "plan-milestone");
 	});
 
 	test("buildSdkOptions prefers custom workflow MCP question tools over native AskUserQuestion", () => {
@@ -962,12 +1181,16 @@ describe("stream-adapter — session persistence (#2859)", () => {
 			GSD_WORKFLOW_MCP_ENV: JSON.stringify({ GSD_CLI_PATH: "/tmp/gsd" }),
 			GSD_WORKFLOW_MCP_CWD: "/tmp/project",
 		});
+		const originalCwd = process.cwd();
+		const emptyDir = mkdtempSync(join(tmpdir(), "claude-mcp-custom-inject-"));
 		try {
+			process.chdir(emptyDir);
 
 			const options = buildSdkOptions("claude-sonnet-4-20250514", "test");
 			const mcpServers = options.mcpServers as Record<string, any>;
 			assert.ok(mcpServers?.["custom-workflow"], "expected custom workflow server config");
-			assert.deepEqual(options.disallowedTools, ["AskUserQuestion"]);
+			assert.ok(mcpServers?.["gsd-browser"], "expected gsd-browser server config");
+			assert.deepEqual(options.disallowedTools, ["ToolSearch", "AskUserQuestion"]);
 			assert.deepEqual(options.allowedTools, [
 				"Read",
 				"Write",
@@ -979,8 +1202,11 @@ describe("stream-adapter — session persistence (#2859)", () => {
 				"WebFetch",
 				"WebSearch",
 				"mcp__custom-workflow__*",
+				"mcp__gsd-browser__*",
 			]);
 		} finally {
+			process.chdir(originalCwd);
+			rmSync(emptyDir, { recursive: true, force: true });
 			restore();
 		}
 	});
@@ -1008,10 +1234,11 @@ describe("stream-adapter — session persistence (#2859)", () => {
 			// Either outcome is valid — the key invariant is no crash.
 			const mcpServers = (options as any).mcpServers;
 			if (mcpServers) {
-				assert.ok(mcpServers["gsd-workflow"], "if present, must be gsd-workflow");
-				assert.deepEqual((options as any).disallowedTools, ["AskUserQuestion"]);
+				assert.ok(mcpServers["gsd-workflow"], "if present, must include gsd-workflow");
+				assert.ok(mcpServers["gsd-browser"], "if present, must include gsd-browser");
+				assert.deepEqual((options as any).disallowedTools, ["ToolSearch", "AskUserQuestion"]);
 			} else {
-				assert.deepEqual((options as any).disallowedTools, []);
+				assert.deepEqual((options as any).disallowedTools, ["ToolSearch"]);
 			}
 			rmSync(emptyDir, { recursive: true, force: true });
 		} finally {
@@ -1043,6 +1270,7 @@ describe("stream-adapter — session persistence (#2859)", () => {
 			const options = buildSdkOptions("claude-sonnet-4-20250514", "test");
 			const mcpServers = options.mcpServers as Record<string, any>;
 			assert.ok(mcpServers?.["gsd-workflow"], "expected gsd-workflow server config");
+			assert.ok(mcpServers?.["gsd-browser"], "expected gsd-browser server config");
 			const srv = mcpServers["gsd-workflow"];
 			assert.equal(srv.command, process.execPath);
 			assert.deepEqual(srv.args, [realpathSync(resolve(repoDir, "packages", "mcp-server", "dist", "cli.js"))]);
@@ -1050,7 +1278,7 @@ describe("stream-adapter — session persistence (#2859)", () => {
 			assert.equal(srv.env.GSD_CLI_PATH, "/tmp/gsd");
 			assert.equal(srv.env.GSD_PERSIST_WRITE_GATE_STATE, "1");
 			assert.equal(srv.env.GSD_WORKFLOW_PROJECT_ROOT, resolvedRepoDir);
-			assert.deepEqual(options.disallowedTools, ["AskUserQuestion"]);
+			assert.deepEqual(options.disallowedTools, ["ToolSearch", "AskUserQuestion"]);
 		} finally {
 			process.chdir(originalCwd);
 			rmSync(repoDir, { recursive: true, force: true });
@@ -1082,9 +1310,11 @@ describe("stream-adapter — session persistence (#2859)", () => {
 			);
 			process.chdir(projectDir);
 			const options = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, { cwd: worktreeDir });
-			assert.equal(options.mcpServers, undefined, "should not inject when project root already declares workflow MCP");
+			const mcpServers = options.mcpServers as Record<string, any>;
+			assert.deepEqual(Object.keys(mcpServers), ["gsd-browser"], "should inject only browser when project root already declares workflow MCP");
 			const allowedTools = options.allowedTools as string[];
 			assert.ok(allowedTools.includes("mcp__gsd-workflow__*"), "worktree cwd must still allow workflow MCP tools from project config");
+			assert.ok(allowedTools.includes("mcp__gsd-browser__*"), "worktree cwd must allow default browser MCP tools");
 		} finally {
 			process.chdir(originalCwd);
 			rmSync(projectDir, { recursive: true, force: true });
@@ -1092,7 +1322,41 @@ describe("stream-adapter — session persistence (#2859)", () => {
 		}
 	});
 
-	test("buildSdkOptions does not inject workflow MCP when already declared in project .mcp.json (avoids duplicate registration)", () => {
+	test("buildSdkOptions force-inlines workflow MCP for GSD phases when project .mcp.json already declares it", () => {
+		const restore = setWorkflowMcpEnv({
+			GSD_WORKFLOW_MCP_COMMAND: "node",
+			GSD_WORKFLOW_MCP_NAME: "gsd-workflow",
+			GSD_WORKFLOW_MCP_ARGS: JSON.stringify(["packages/mcp-server/dist/cli.js"]),
+			GSD_WORKFLOW_MCP_ENV: JSON.stringify({ GSD_CLI_PATH: "/tmp/gsd" }),
+			GSD_WORKFLOW_MCP_CWD: "/tmp/project",
+		});
+		const originalCwd = process.cwd();
+		const projectDir = mkdtempSync(join(tmpdir(), "claude-mcp-inline-project-"));
+		try {
+			writeFileSync(
+				join(projectDir, ".mcp.json"),
+				JSON.stringify({ mcpServers: { "gsd-workflow": { command: "node", args: ["old-cli.js"] }, "other-mcp": { command: "npx", args: ["other"] } } }),
+			);
+			process.chdir(projectDir);
+			const options = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, { gsdPhase: "plan-milestone" });
+
+			assert.equal(options.strictMcpConfig, true);
+			assert.deepEqual(options.settingSources, []);
+			assert.deepEqual(options.mcpServers, {
+				"gsd-workflow": { command: "node", args: ["old-cli.js"] },
+			});
+			const allowedTools = options.allowedTools as string[];
+			assert.ok(allowedTools.includes("mcp__gsd-workflow__gsd_plan_milestone"));
+			assert.ok(allowedTools.includes("mcp__gsd-workflow__gsd_milestone_status"));
+			assert.ok(allowedTools.includes("mcp__gsd-workflow__*"));
+		} finally {
+			process.chdir(originalCwd);
+			rmSync(projectDir, { recursive: true, force: true });
+			restore();
+		}
+	});
+
+	test("buildSdkOptions does not inject workflow MCP when already declared in project .mcp.json outside GSD phases", () => {
 		const restore = setWorkflowMcpEnv({
 			GSD_WORKFLOW_MCP_COMMAND: "node",
 			GSD_WORKFLOW_MCP_NAME: "gsd-workflow",
@@ -1111,13 +1375,70 @@ describe("stream-adapter — session persistence (#2859)", () => {
 			process.chdir(projectDir);
 			const options = buildSdkOptions("claude-sonnet-4-20250514", "test");
 			// Should NOT inject gsd-workflow via mcpServers (project already has it)
-			assert.equal(options.mcpServers, undefined, "mcpServers should be omitted when workflow already in .mcp.json");
+			const mcpServers = options.mcpServers as Record<string, any>;
+			assert.deepEqual(Object.keys(mcpServers), ["gsd-browser"], "mcpServers should inject only browser when workflow already in .mcp.json");
 			// But allowedTools should still include the workflow pattern
 			const allowedTools = options.allowedTools as string[];
 			assert.ok(allowedTools.includes("mcp__gsd-workflow__*"), "allowedTools must include workflow pattern even when not injected");
+			assert.ok(allowedTools.includes("mcp__gsd-browser__*"), "allowedTools must include browser pattern for default UAT");
 			// AskUserQuestion should be disallowed (workflow is available via project config)
 			const disallowedTools = options.disallowedTools as string[];
 			assert.ok(disallowedTools.includes("AskUserQuestion"), "AskUserQuestion should be suppressed when workflow is available");
+		} finally {
+			process.chdir(originalCwd);
+			rmSync(projectDir, { recursive: true, force: true });
+			restore();
+		}
+	});
+
+	test("buildSdkOptions uses project-declared custom workflow MCP namespace", () => {
+		const restore = setWorkflowMcpEnv({
+			GSD_WORKFLOW_MCP_COMMAND: "node",
+			GSD_WORKFLOW_MCP_NAME: "gsd-workflow",
+			GSD_WORKFLOW_MCP_ARGS: JSON.stringify(["packages/mcp-server/dist/cli.js"]),
+			GSD_WORKFLOW_MCP_ENV: JSON.stringify({ GSD_CLI_PATH: "/tmp/gsd" }),
+			GSD_WORKFLOW_MCP_CWD: "/tmp/project",
+		});
+		const originalCwd = process.cwd();
+		const projectDir = mkdtempSync(join(tmpdir(), "claude-mcp-custom-project-"));
+		try {
+			writeFileSync(
+				join(projectDir, ".mcp.json"),
+				JSON.stringify({
+					mcpServers: {
+						"custom-workflow": {
+							command: "node",
+							args: ["custom-cli.js"],
+							env: { GSD_WORKFLOW_PROJECT_ROOT: projectDir },
+						},
+					},
+				}),
+			);
+			process.chdir(projectDir);
+			const options = buildSdkOptions("claude-sonnet-4-20250514", "test");
+			const mcpServers = options.mcpServers as Record<string, any>;
+			assert.deepEqual(Object.keys(mcpServers), ["gsd-browser"], "should inject only browser when project declares a workflow server");
+			const allowedTools = options.allowedTools as string[];
+			assert.ok(allowedTools.includes("mcp__custom-workflow__*"), "allowedTools must use the project workflow namespace");
+			assert.ok(allowedTools.includes("mcp__gsd-browser__*"), "allowedTools must include default browser namespace");
+			assert.ok(!allowedTools.includes("mcp__gsd-workflow__*"), "allowedTools must not advertise the absent default namespace");
+			const disallowedTools = options.disallowedTools as string[];
+			assert.ok(disallowedTools.includes("AskUserQuestion"), "AskUserQuestion should be suppressed when workflow is available");
+
+			const phaseOptions = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, { gsdPhase: "plan-milestone" });
+			assert.equal(phaseOptions.strictMcpConfig, true);
+			assert.deepEqual(phaseOptions.settingSources, []);
+			assert.deepEqual(phaseOptions.mcpServers, {
+				"custom-workflow": {
+					command: "node",
+					args: ["custom-cli.js"],
+					env: { GSD_WORKFLOW_PROJECT_ROOT: projectDir },
+				},
+			});
+			const phaseAllowedTools = phaseOptions.allowedTools as string[];
+			assert.ok(phaseAllowedTools.includes("mcp__custom-workflow__gsd_plan_milestone"));
+			assert.ok(phaseAllowedTools.includes("mcp__custom-workflow__gsd_milestone_status"));
+			assert.ok(!phaseAllowedTools.includes("mcp__gsd-workflow__*"));
 		} finally {
 			process.chdir(originalCwd);
 			rmSync(projectDir, { recursive: true, force: true });

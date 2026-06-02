@@ -15,6 +15,7 @@ import {
   getAllMilestones,
 } from "../gsd-db.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
+import { autoSession } from "../auto-runtime-state.ts";
 import { markApprovalGateVerified, markDepthVerified, clearDiscussionFlowState, loadWriteGateSnapshot, setPendingGate } from "../bootstrap/write-gate.ts";
 import {
   executeCompleteMilestone,
@@ -29,6 +30,7 @@ import {
   executeSliceComplete,
   executeSliceReopen,
   executeValidateMilestone,
+  executeUatResultSave,
 } from "../tools/workflow-tool-executors.ts";
 
 function makeTmpBase(): string {
@@ -54,6 +56,29 @@ async function inProjectDir<T>(dir: string, fn: () => Promise<T>): Promise<T> {
     process.chdir(originalCwd);
   }
 }
+
+test("closeout executors reject phase escalation from the wrong active auto unit", async () => {
+  autoSession.reset();
+  autoSession.active = true;
+  autoSession.basePath = "/tmp/project";
+  autoSession.currentUnit = { type: "execute-task", id: "M001/S01/T01", startedAt: Date.now() };
+
+  try {
+    const slice = await executeSliceComplete({} as Parameters<typeof executeSliceComplete>[0], "/tmp/project");
+    assert.equal(slice.isError, true);
+    assert.match(String(slice.details.error), /complete_slice may only run from complete-slice/);
+
+    const validate = await executeValidateMilestone({} as Parameters<typeof executeValidateMilestone>[0], "/tmp/project");
+    assert.equal(validate.isError, true);
+    assert.match(String(validate.details.error), /validate_milestone may only run from validate-milestone/);
+
+    const milestone = await executeCompleteMilestone({} as Parameters<typeof executeCompleteMilestone>[0], "/tmp/project");
+    assert.equal(milestone.isError, true);
+    assert.match(String(milestone.details.error), /complete_milestone may only run from complete-milestone/);
+  } finally {
+    autoSession.reset();
+  }
+});
 
 function seedMilestone(milestoneId: string, title: string, status = "active"): void {
   const db = _getAdapter();
@@ -108,6 +133,34 @@ test("executeSummarySave persists artifact and returns computed path", async () 
   }
 });
 
+test("executeSummarySave mirrors milestone artifacts into the active worktree projection", async () => {
+  const base = makeTmpBase();
+  const worktree = join(base, ".gsd", "worktrees", "M001");
+  try {
+    mkdirSync(join(worktree, ".gsd"), { recursive: true });
+    writeFileSync(join(worktree, ".git"), "gitdir: ../../../.git/worktrees/M001\n");
+    openTestDb(base);
+
+    const result = await inProjectDir(worktree, () => executeSummarySave({
+      milestone_id: "M001",
+      slice_id: "S02",
+      artifact_type: "RESEARCH",
+      content: "# S02 Research\n\ncanonical and worktree",
+    }, worktree));
+
+    assert.equal(result.details.operation, "save_summary");
+    const relPath = "milestones/M001/slices/S02/S02-RESEARCH.md";
+    const projectPath = join(base, ".gsd", relPath);
+    const worktreePath = join(worktree, ".gsd", relPath);
+    assert.equal(existsSync(projectPath), true, "canonical artifact should be written");
+    assert.equal(existsSync(worktreePath), true, "active worktree projection should be mirrored");
+    assert.match(readFileSync(worktreePath, "utf-8"), /S02 Research/);
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
 test("executeTaskComplete coerces string verificationEvidence entries", async () => {
   const base = makeTmpBase();
   try {
@@ -142,6 +195,60 @@ test("executeTaskComplete coerces string verificationEvidence entries", async ()
 
     const summaryPath = String(result.details.summaryPath);
     assert.ok(existsSync(summaryPath), "task summary should be written to disk");
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("executeTaskComplete derives missing verification from evidence", async () => {
+  const base = makeTmpBase();
+  try {
+    openTestDb(base);
+    const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+    mkdirSync(planDir, { recursive: true });
+    writeFileSync(join(planDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Demo** `est:5m`\n");
+
+    const result = await inProjectDir(base, () => executeTaskComplete({
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      oneLiner: "Completed task",
+      narrative: "Did the work",
+      verificationEvidence: [
+        { command: "npm test", exitCode: 0, verdict: "pass", durationMs: 1234 },
+      ],
+    }, base));
+
+    assert.equal(result.details.operation, "complete_task");
+    const db = _getAdapter();
+    assert.ok(db, "DB should be open");
+    const row = db!.prepare(
+      "SELECT verification_result FROM tasks WHERE milestone_id = ? AND slice_id = ? AND id = ?",
+    ).get("M001", "S01", "T01") as Record<string, unknown> | undefined;
+
+    assert.match(String(row?.verification_result), /Verification evidence recorded/);
+    assert.match(String(row?.verification_result), /`npm test` exited 0 \(pass\)/);
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("executeTaskComplete returns a tool error when verification cannot be derived", async () => {
+  const base = makeTmpBase();
+  try {
+    openTestDb(base);
+    const result = await inProjectDir(base, () => executeTaskComplete({
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      oneLiner: "Completed task",
+      narrative: "Did the work",
+    }, base));
+
+    assert.equal(result.isError, true);
+    assert.match(String(result.content[0]?.text), /verification is required/);
   } finally {
     closeDatabase();
     cleanup(base);
@@ -392,6 +499,88 @@ test("executePlanSlice marks validation failures with isError", async () => {
     assert.equal(result.details.operation, "plan_slice");
     assert.match(String(result.details.error), /validation failed: tasks must be a non-empty array/);
     assert.match(result.content[0].text, /Error planning slice:/);
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("executeUatResultSave accepts gsd_uat_exec evidence written in a milestone worktree", async () => {
+  const base = makeTmpBase();
+  const worktree = join(base, ".gsd", "worktrees", "M001");
+  const worktreeExecDir = join(worktree, ".gsd", "exec");
+  const browserTimelineDir = join(base, ".artifacts", "browser", "session");
+  const evidenceId = "worktree-uat-evidence";
+  const browserTimelinePath = join(browserTimelineDir, "s02-uat-browser-timeline.json");
+  try {
+    openTestDb(base);
+    seedMilestone("M001", "Milestone One");
+    seedSlice("M001", "S02", "complete");
+    mkdirSync(worktreeExecDir, { recursive: true });
+    mkdirSync(browserTimelineDir, { recursive: true });
+    writeFileSync(browserTimelinePath, JSON.stringify({ summary: "browser timeline evidence" }), "utf-8");
+    writeFileSync(
+      join(worktreeExecDir, `${evidenceId}.meta.json`),
+      JSON.stringify({
+        id: evidenceId,
+        metadata: {
+          kind: "uat_exec",
+          milestoneId: "M001",
+          sliceId: "S02",
+          checkId: "UAT-01",
+          intent: "uat-runtime-check",
+        },
+      }),
+      "utf-8",
+    );
+
+    const result = await inProjectDir(worktree, () => executeUatResultSave({
+      milestoneId: "M001",
+      sliceId: "S02",
+      uatType: "runtime-executable",
+      verdict: "PASS",
+      checks: [{
+        id: "UAT-01",
+        description: "Runtime path C:\\tmp|uat evidence was captured in the active worktree",
+        mode: "runtime",
+        result: "PASS",
+        evidence: [
+          { kind: "gsd_uat_exec", ref: evidenceId },
+          { kind: "browser", ref: browserTimelinePath },
+        ],
+        notes: "Worktree-local gsd_uat_exec metadata should resolve with backslash \\ and pipe |.",
+      }],
+      presentation: {
+        surface: "mcp",
+        presentedTools: [
+          "gsd_uat_exec",
+          "gsd_uat_result_save",
+          "gsd_resume",
+          "gsd_milestone_status",
+          "gsd_journal_query",
+        ],
+        blockedTools: [
+          { name: "gsd_exec", reason: "forbidden during run-uat" },
+          { name: "gsd_summary_save", reason: "forbidden during run-uat" },
+          { name: "gsd_save_gate_result", reason: "forbidden during run-uat" },
+        ],
+      },
+      notes: "UAT passed with worktree-local evidence.",
+    }, worktree));
+
+    assert.equal(result.isError, undefined);
+    assert.equal(result.details.operation, "save_uat_result");
+    assert.equal(result.details.verdict, "PASS");
+    assert.ok(
+      existsSync(join(base, ".gsd", "uat", "M001", "S02", "attempt-1.json")),
+      "attempt JSON should be persisted under the authoritative project .gsd",
+    );
+    const assessment = readFileSync(
+      join(base, ".gsd", "milestones", "M001", "slices", "S02", "S02-ASSESSMENT.md"),
+      "utf-8",
+    );
+    assert.match(assessment, /Runtime path C:\\\\tmp\\\|uat evidence/);
+    assert.match(assessment, /backslash \\\\ and pipe \\\|/);
   } finally {
     closeDatabase();
     cleanup(base);

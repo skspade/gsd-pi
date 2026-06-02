@@ -675,7 +675,9 @@ async function prepareToolCall(
 		if (isToolSearchToolName(toolCall.name)) {
 			return {
 				kind: "immediate",
-				result: createToolSearchShimResult(toolCall.arguments),
+				result: createToolSearchShimResult(toolCall.arguments, {
+					activeToolNames: currentContext.tools?.map((tool) => tool.name),
+				}),
 				isError: false,
 			};
 		}

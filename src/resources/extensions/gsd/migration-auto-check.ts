@@ -6,6 +6,7 @@ import {
   getMilestoneSlices,
   getSliceTasks,
   isDbAvailable,
+  refreshOpenDatabaseFromDisk,
 } from "./gsd-db.js";
 import { parsePlan, parseRoadmap } from "./parsers-legacy.js";
 import {
@@ -104,6 +105,11 @@ export async function checkMarkdownHierarchyAgainstDb(
     throw new Error(`failed to open or create the GSD database at ${basePath}`);
   }
 
+  // The markdown projections may have just been written by a workflow/MCP
+  // server in another process. Reopen before comparing so startup does not
+  // warn from a stale long-lived SQLite handle.
+  refreshOpenDatabaseFromDisk();
+
   const beforeDb = countDbHierarchy();
   if (sameCounts(markdown, beforeDb)) {
     return { action: "none", reason: "in-sync", markdown, beforeDb, afterDb: beforeDb };
@@ -116,11 +122,11 @@ export async function checkMarkdownHierarchyAgainstDb(
     markdown,
     beforeDb,
     afterDb: beforeDb,
-    recoveryCommand: "/gsd recover",
+    recoveryCommand: "/gsd recover --confirm",
     message:
       `Markdown planning artifacts (${markdown.milestones}M/${markdown.slices}S/${markdown.tasks}T) ` +
       `do not match the authoritative DB (${beforeDb.milestones}M/${beforeDb.slices}S/${beforeDb.tasks}T). ` +
-      "Runtime startup will not import markdown automatically; run `/gsd recover` if markdown should repopulate the database.",
+      "Runtime startup will not import markdown automatically; run `/gsd recover --confirm` if markdown should repopulate the database.",
   };
 }
 

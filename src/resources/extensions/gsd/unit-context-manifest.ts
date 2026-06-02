@@ -13,6 +13,8 @@
 //
 // Phased rollout tracking:
 //   - Phase 1 (this PR): schema + manifests + coverage test.
+//   - Phase 1b (skill token savings): skills policy wired via skill-scope.ts
+//     and setVisibleSkills(); allowlists derived from skill-manifest.ts.
 //   - Phase 2: add composeSystemPromptForUnit(); migrate one low-risk
 //     unit type (e.g. reassess-roadmap) as the pilot.
 //   - Phase 3: migrate remaining unit types, tighten manifests per
@@ -135,7 +137,9 @@ export type ContextModePolicy =
  *                    edits project markdown outside .gsd/.
  *   - "verification"
  *                  — Read tools + Bash for verification commands, writes
- *                    restricted to .gsd/**, no subagents.
+ *                    restricted to .gsd/**. Subagent dispatch is denied unless
+ *                    `allowedSubagents` opts a unit into controlled read-only
+ *                    specialist delegation.
  *
  * The allowlist for "docs" is declared per-manifest rather than hardcoded so
  * projects with non-standard doc layouts can extend it without forking the
@@ -148,7 +152,7 @@ export type ToolsPolicy =
   | { readonly mode: "planning" }
   | { readonly mode: "planning-dispatch"; readonly allowedSubagents: readonly string[] }
   | { readonly mode: "docs"; readonly allowedPathGlobs: readonly string[] }
-  | { readonly mode: "verification" };
+  | { readonly mode: "verification"; readonly allowedSubagents?: readonly string[] };
 
 // ─── Computed-artifact registry (#4924 v2 contract) ───────────────────────
 
@@ -277,11 +281,20 @@ export interface UnitContextManifest {
 
 // ─── Manifests ────────────────────────────────────────────────────────────
 
-// Phase 1 policy: every manifest encodes today's behavior. Skills = "all"
-// unless the unit type was already narrowed via the existing skill-manifest
-// resolver (#4779). Memory/knowledge policies reflect the defaults in
-// `bootstrap/system-context.ts`. Artifact classifications follow what
-// `auto-prompts.ts` inlines today for each unit type.
+// Phase 1 policy: skills policy is derived from skill-manifest.ts allowlists
+// via `skillPolicyForUnit()`; units without an allowlist keep mode "all".
+// Explicit mode "none" remains for lightweight config units.
+
+import { resolveSkillManifest } from "./skill-manifest.js";
+
+/** Derive skills policy from skill-manifest allowlists; default to full catalog. */
+function skillPolicyForUnit(unitType: string): SkillsPolicy {
+  const allowlist = resolveSkillManifest(unitType);
+  if (allowlist) {
+    return { mode: "allowlist", skills: allowlist };
+  }
+  return { mode: "all" };
+}
 
 const COMMON_BUDGET_LARGE = 1_500_000;  // ~400K tokens
 const COMMON_BUDGET_MEDIUM = 750_000;   // ~200K tokens
@@ -294,6 +307,10 @@ const COMMON_BUDGET_SMALL = 250_000;    // ~65K tokens
 const TOOLS_ALL: ToolsPolicy = { mode: "all" };
 const TOOLS_PLANNING: ToolsPolicy = { mode: "planning" };
 const TOOLS_VERIFICATION: ToolsPolicy = { mode: "verification" };
+const TOOLS_VERIFICATION_DISPATCH_UAT: ToolsPolicy = {
+  mode: "verification",
+  allowedSubagents: ["mnemo", "scout", "reviewer", "tester"],
+};
 // Like TOOLS_PLANNING but permits dispatch to read-only recon/planning
 // specialists. Runtime-enforced by write-gate.ts before the subagent tool runs.
 const TOOLS_PLANNING_DISPATCH_RECON: ToolsPolicy = {
@@ -362,7 +379,7 @@ export type UnitType = typeof KNOWN_UNIT_TYPES[number];
 export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
   // ─── Milestone-scoped ────────────────────────────────────────────────
   "research-milestone": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("research-milestone"),
     knowledge: "full",
     memory: "prompt-relevant",
     codebaseMap: true,
@@ -379,7 +396,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     maxSystemPromptChars: COMMON_BUDGET_MEDIUM,
   },
   "plan-milestone": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("plan-milestone"),
     knowledge: "full",
     memory: "prompt-relevant",
     codebaseMap: true,
@@ -394,7 +411,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     maxSystemPromptChars: COMMON_BUDGET_LARGE,
   },
   "discuss-milestone": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("discuss-milestone"),
     knowledge: "full",
     memory: "prompt-relevant",
     codebaseMap: true,
@@ -409,7 +426,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     maxSystemPromptChars: COMMON_BUDGET_MEDIUM,
   },
   "validate-milestone": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("validate-milestone"),
     knowledge: "scoped",
     memory: "prompt-relevant",
     codebaseMap: false,
@@ -426,7 +443,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     maxSystemPromptChars: COMMON_BUDGET_LARGE,
   },
   "complete-milestone": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("complete-milestone"),
     knowledge: "scoped",
     memory: "prompt-relevant",
     codebaseMap: false,
@@ -463,7 +480,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
 
   // ─── Slice-scoped ────────────────────────────────────────────────────
   "research-slice": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("research-slice"),
     knowledge: "full",
     memory: "prompt-relevant",
     codebaseMap: true,
@@ -480,7 +497,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     maxSystemPromptChars: COMMON_BUDGET_MEDIUM,
   },
   "plan-slice": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("plan-slice"),
     knowledge: "full",
     memory: "prompt-relevant",
     codebaseMap: true,
@@ -498,7 +515,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     maxSystemPromptChars: COMMON_BUDGET_LARGE,
   },
   "refine-slice": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("refine-slice"),
     knowledge: "scoped",
     memory: "prompt-relevant",
     codebaseMap: true,
@@ -516,7 +533,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     maxSystemPromptChars: COMMON_BUDGET_MEDIUM,
   },
   "replan-slice": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("replan-slice"),
     knowledge: "scoped",
     memory: "prompt-relevant",
     codebaseMap: true,
@@ -531,7 +548,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     maxSystemPromptChars: COMMON_BUDGET_MEDIUM,
   },
   "complete-slice": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("complete-slice"),
     knowledge: "scoped",
     memory: "prompt-relevant",
     codebaseMap: false,
@@ -552,7 +569,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     maxSystemPromptChars: COMMON_BUDGET_LARGE,
   },
   "reassess-roadmap": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("reassess-roadmap"),
     knowledge: "scoped",
     memory: "critical-only",
     codebaseMap: false,
@@ -569,7 +586,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
 
   // ─── Task-scoped ─────────────────────────────────────────────────────
   "execute-task": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("execute-task"),
     knowledge: "scoped",
     memory: "prompt-relevant",
     codebaseMap: true,
@@ -584,7 +601,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     maxSystemPromptChars: COMMON_BUDGET_LARGE,
   },
   "reactive-execute": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("reactive-execute"),
     knowledge: "scoped",
     memory: "prompt-relevant",
     codebaseMap: true,
@@ -601,13 +618,13 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
 
   // ─── Ancillary units ─────────────────────────────────────────────────
   "run-uat": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("run-uat"),
     knowledge: "critical-only",
     memory: "critical-only",
     codebaseMap: false,
     preferences: "active-only",
     contextMode: "verification",
-    tools: TOOLS_VERIFICATION,
+    tools: TOOLS_VERIFICATION_DISPATCH_UAT,
     artifacts: {
       inline: ["slice-uat"],
       excerpt: ["slice-summary"],
@@ -616,7 +633,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     maxSystemPromptChars: COMMON_BUDGET_SMALL,
   },
   "gate-evaluate": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("gate-evaluate"),
     knowledge: "critical-only",
     memory: "critical-only",
     codebaseMap: false,
@@ -633,7 +650,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     maxSystemPromptChars: COMMON_BUDGET_SMALL,
   },
   "rewrite-docs": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("rewrite-docs"),
     knowledge: "scoped",
     memory: "prompt-relevant",
     codebaseMap: true,
@@ -648,7 +665,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     maxSystemPromptChars: COMMON_BUDGET_MEDIUM,
   },
   "triage-captures": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("triage-captures"),
     knowledge: "scoped",
     memory: "prompt-relevant",
     codebaseMap: false,
@@ -663,7 +680,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     maxSystemPromptChars: COMMON_BUDGET_MEDIUM,
   },
   "quick-task": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("quick-task"),
     knowledge: "full",
     memory: "prompt-relevant",
     codebaseMap: true,
@@ -716,7 +733,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
   // discussion runs before any milestone exists, so milestone artifacts are
   // not loaded. Keeps templates available for PROJECT.md scaffolding.
   "discuss-project": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("discuss-project"),
     knowledge: "scoped",
     memory: "prompt-relevant",
     codebaseMap: true,
@@ -733,7 +750,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
   // discuss-requirements: REQUIREMENTS.md interview. PROJECT.md is the
   // primary context input; templates carry the requirements format.
   "discuss-requirements": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("discuss-requirements"),
     knowledge: "scoped",
     memory: "prompt-relevant",
     codebaseMap: true,
@@ -769,7 +786,7 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
   // planning-dispatch policy to dispatch them. PROJECT.md + REQUIREMENTS.md
   // give the orchestrator the framing context.
   "research-project": {
-    skills: { mode: "all" },
+    skills: skillPolicyForUnit("research-project"),
     knowledge: "scoped",
     memory: "prompt-relevant",
     codebaseMap: true,
@@ -813,9 +830,12 @@ export function compileSubagentPermissionContract(
   if (policy.mode === "all") {
     return { allowed: true, allowedSubagents: ["*"], toolsMode: policy.mode };
   }
-  if (policy.mode === "planning-dispatch") {
+  if (
+    (policy.mode === "planning-dispatch" || policy.mode === "verification") &&
+    Array.isArray(policy.allowedSubagents)
+  ) {
     return {
-      allowed: true,
+      allowed: policy.allowedSubagents.length > 0,
       allowedSubagents: [...policy.allowedSubagents],
       toolsMode: policy.mode,
     };

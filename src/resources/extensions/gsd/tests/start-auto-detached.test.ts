@@ -15,6 +15,13 @@ function readGsdFile(relativePath: string): string {
   return readFileSync(resolve(gsdDir, relativePath), "utf-8");
 }
 
+function firstIndexOfAny(source: string, needles: string[]): number {
+  const indexes = needles
+    .map((needle) => source.indexOf(needle))
+    .filter((index) => index > -1);
+  return indexes.length > 0 ? Math.min(...indexes) : -1;
+}
+
 test("command entrypoints use startAutoDetached instead of awaiting startAuto (#3733)", () => {
   const autoHandlerSrc = readGsdFile("commands/handlers/auto.ts");
   const workflowHandlerSrc = readGsdFile("commands/handlers/workflow.ts");
@@ -141,11 +148,16 @@ test("fresh start registers the auto worker before bootstrap enters worktree flo
   const freshStartSectionIdx = startAutoBody.indexOf("// ── Fresh start path — delegated to auto-start.ts ──");
   const resumeBody = startAutoBody.slice(resumeSectionIdx, freshStartSectionIdx);
   const resumeDbOpenIdx = resumeBody.indexOf("await openProjectDbIfPresent(base);");
+  const resumeMergeReconcileIdx = resumeBody.indexOf("reconcileMergedMilestonesFromJournal(base);");
   const resumeRegisterIdx = resumeBody.indexOf("registerAutoWorkerForSession(s, base);");
   const resumeEnterMilestoneIdx = resumeBody.indexOf("buildLifecycle().enterMilestone");
   const dbOpenIdx = bootstrapBody.indexOf("await openProjectDbIfPresent(base);");
   const bootstrapRegisterIdx = bootstrapBody.indexOf("registerAutoWorkerForSession(base);");
-  const enterMilestoneIdx = bootstrapBody.indexOf("buildLifecycle().enterMilestone");
+  const enterMilestoneIdx = firstIndexOfAny(bootstrapBody, [
+    "buildLifecycle().enterMilestone",
+    "lifecycle.enterMilestone",
+    "lifecycle.adoptStrandedMilestone",
+  ]);
 
   assert.ok(startAutoIdx > -1, "startAuto should exist");
   assert.ok(preBootstrapRegisterIdx > -1, "startAuto should register worker before bootstrap");
@@ -153,12 +165,13 @@ test("fresh start registers the auto worker before bootstrap enters worktree flo
   assert.ok(resumeSectionIdx > -1, "startAuto should have resume milestone entry flow");
   assert.ok(freshStartSectionIdx > resumeSectionIdx, "resume assertions should be scoped before fresh start");
   assert.ok(resumeDbOpenIdx > -1, "resume should open DB before milestone entry");
+  assert.ok(resumeMergeReconcileIdx > -1, "resume should reconcile merged milestones before deriving dispatch state");
   assert.ok(resumeRegisterIdx > -1, "resume should register worker before milestone entry");
   assert.ok(resumeEnterMilestoneIdx > -1, "resume should enter milestones through lifecycle");
   assert.ok(bootstrapIdx > -1, "bootstrapAutoSession should exist");
   assert.ok(dbOpenIdx > -1, "bootstrap should open the project DB");
   assert.ok(bootstrapRegisterIdx > -1, "bootstrap should register worker after DB open");
-  assert.ok(enterMilestoneIdx > -1, "bootstrap should enter milestones through lifecycle");
+  assert.ok(enterMilestoneIdx > -1, "bootstrap should enter or adopt milestones through lifecycle");
   assert.ok(
     preBootstrapRegisterIdx < bootstrapCallIdx,
     "worker registration must happen before bootstrap so enterMilestone can claim milestone leases on first entry",
@@ -168,8 +181,10 @@ test("fresh start registers the auto worker before bootstrap enters worktree flo
     "bootstrap must open DB and register worker before first enterMilestone",
   );
   assert.ok(
-    resumeDbOpenIdx < resumeRegisterIdx && resumeRegisterIdx < resumeEnterMilestoneIdx,
-    "resume must open DB and register worker before first enterMilestone",
+    resumeDbOpenIdx < resumeMergeReconcileIdx &&
+      resumeMergeReconcileIdx < resumeRegisterIdx &&
+      resumeRegisterIdx < resumeEnterMilestoneIdx,
+    "resume must open DB, reconcile merged milestones, and register worker before first enterMilestone",
   );
 });
 

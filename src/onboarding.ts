@@ -17,6 +17,7 @@ import type { AuthStorage } from '@gsd/pi-coding-agent'
 import { renderGsdPiLogo, GSD_PI_BRAND, GSD_WEBSITE } from './logo.js'
 import { agentDir } from './app-paths.js'
 import { isClaudeCliReady } from './claude-cli-check.js'
+import { isAntigravityCliReady, isGeminiCliReady } from './resources/extensions/google-cli/readiness.js'
 import {
   markOnboardingComplete,
   markStepCompleted,
@@ -109,7 +110,7 @@ export const OTHER_PROVIDERS = [
   { value: 'xai', label: 'xAI (Grok)', hint: 'console.x.ai' },
   { value: 'openrouter', label: 'OpenRouter', hint: '200+ models — openrouter.ai/keys' },
   { value: 'mistral', label: 'Mistral', hint: 'console.mistral.ai/api-keys' },
-  { value: 'minimax', label: 'MiniMax', hint: 'platform.minimax.io (Anthropic-compatible recommended)' },
+  { value: 'minimax', label: 'MiniMax', hint: 'platform.minimax.io (Anthropic-compatible)' },
   { value: 'minimax-cn', label: 'MiniMax CN', hint: 'api.minimaxi.com (Anthropic-compatible)' },
   { value: 'ollama-cloud', label: 'Ollama Cloud' },
   { value: 'custom-openai', label: 'Custom (OpenAI-compatible)', hint: 'Ollama, LM Studio, vLLM, proxies — see docs/providers.md' },
@@ -405,12 +406,24 @@ export async function runLlmStep(p: ClackModule, pc: PicoModule, authStorage: Au
   // This is the only TOS-compliant path for Anthropic subscription users.
   if (isClaudeCliReady()) {
     authOptions.push(
-      { value: 'claude-cli', label: 'Use Claude Code CLI', hint: 'recommended — uses your existing Claude subscription' },
+      { value: 'claude-cli', label: 'Use Claude Code CLI', hint: 'uses your existing Claude subscription' },
+    )
+  }
+
+  if (isGeminiCliReady()) {
+    authOptions.push(
+      { value: 'gemini-cli', label: 'Use Google Gemini CLI', hint: 'uses your existing Gemini CLI session' },
+    )
+  }
+
+  if (isAntigravityCliReady()) {
+    authOptions.push(
+      { value: 'antigravity-cli', label: 'Use Antigravity CLI', hint: 'uses your existing Antigravity session' },
     )
   }
 
   authOptions.push(
-    { value: 'browser', label: 'Sign in with your browser', hint: 'GitHub Copilot, ChatGPT, Google, etc.' },
+    { value: 'browser', label: 'Sign in with your browser', hint: 'GitHub Copilot or ChatGPT/Codex' },
     { value: 'api-key', label: 'Paste an API key', hint: 'from your provider dashboard' },
     { value: 'skip', label: 'Skip for now', hint: 'use /login inside GSD later' },
   )
@@ -434,6 +447,22 @@ export async function runLlmStep(p: ClackModule, pc: PicoModule, authStorage: Au
     return true
   }
 
+  if (method === 'gemini-cli') {
+    p.log.success('Google Gemini CLI detected — routing through local CLI')
+    p.log.info('Your Gemini CLI session will be used for inference. No API key needed.')
+    authStorage.set('google-gemini-cli', { type: 'api_key', key: 'cli' })
+    persistDefaultProvider('google-gemini-cli')
+    return true
+  }
+
+  if (method === 'antigravity-cli') {
+    p.log.success('Antigravity CLI detected — routing through local CLI')
+    p.log.info('Your Antigravity session will be used for inference. No API key needed.')
+    authStorage.set('google-antigravity', { type: 'api_key', key: 'cli' })
+    persistDefaultProvider('google-antigravity')
+    return true
+  }
+
   // ── Step 2: Which provider? ──────────────────────────────────────────────
   if (method === 'browser') {
     // Anthropic OAuth is removed from browser auth — it violates Anthropic TOS for
@@ -442,12 +471,10 @@ export async function runLlmStep(p: ClackModule, pc: PicoModule, authStorage: Au
     const provider = await p.select({
       message: 'Choose provider',
       options: [
-        { value: 'github-copilot', label: 'GitHub Copilot' },
-        { value: 'openai-codex', label: 'ChatGPT Plus/Pro (Codex)' },
-        { value: 'google-gemini-cli', label: 'Google Gemini CLI' },
-        { value: 'google-antigravity', label: 'Antigravity (Gemini 3, Claude, GPT-OSS)' },
-      ],
-    })
+	        { value: 'github-copilot', label: 'GitHub Copilot' },
+	        { value: 'openai-codex', label: 'ChatGPT Plus/Pro (Codex)' },
+	      ],
+	    })
     if (p.isCancel(provider)) return false
     return await runOAuthFlow(p, pc, authStorage, provider as string, oauthMap)
   }

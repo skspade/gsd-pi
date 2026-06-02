@@ -52,6 +52,7 @@ import * as resourceDisplay from "./interactive-resource-display.js";
 import * as selectors from "./interactive-selectors.js";
 import { clearMarkdownThemeCache, getMarkdownThemeWithSettings as getMarkdownThemeWithSettingsModule } from "./interactive-theme-cache.js";
 import * as uiMessaging from "./interactive-ui-messaging.js";
+import { DEFAULT_TOOL_OUTPUT_EXPANDED } from "./interactive-mode-class-constants.js";
 
 export type {
 	AssistantReplaySegment,
@@ -125,7 +126,7 @@ export class InteractiveMode {
 	private streamingMessage: import("@gsd/pi-ai").AssistantMessage | undefined = undefined;
 
 	private pendingTools = new Map<string, ToolExecutionComponent>();
-	private toolOutputExpanded = true;
+	private toolOutputExpanded = DEFAULT_TOOL_OUTPUT_EXPANDED;
 	private pendingImages: ImageContent[] = [];
 	private hideThinkingBlock = false;
 	private skillCommands = new Map<string, string>();
@@ -205,6 +206,7 @@ export class InteractiveMode {
 		this.footerDataProvider = new FooterDataProvider(process.cwd());
 		this.footer = new FooterComponent(session, this.footerDataProvider);
 		this.footer.setAutoCompactEnabled(session.autoCompactionEnabled);
+		this.toolOutputExpanded = this.settingsManager.getToolsExpanded();
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
 		initTheme(this.settingsManager.getTheme(), true);

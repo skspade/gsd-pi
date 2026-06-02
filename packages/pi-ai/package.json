@@ -1,6 +1,6 @@
 {
   "name": "@gsd/pi-ai",
-  "version": "1.0.2",
+  "version": "1.1.1",
   "description": "Unified LLM API with automatic model discovery and provider configuration",
   "type": "module",
   "gsd": {
@@ -18,6 +18,10 @@
     "./anthropic": {
       "types": "./dist/providers/anthropic.d.ts",
       "import": "./dist/providers/anthropic.js"
+    },
+    "./anthropic-vertex": {
+      "types": "./dist/providers/anthropic-vertex.d.ts",
+      "import": "./dist/providers/anthropic-vertex.js"
     },
     "./azure-openai-responses": {
       "types": "./dist/providers/azure-openai-responses.d.ts",
@@ -57,22 +61,24 @@
     }
   },
   "bin": {
-    "pi-ai": "./dist/cli.js"
+    "pi-ai": "./bin/pi-ai.js"
   },
   "files": [
+    "bin",
     "dist",
     "README.md"
   ],
   "scripts": {
-    "clean": "shx rm -rf dist",
+    "clean": "node ../../scripts/clean-package-dist.cjs",
     "generate-models": "node scripts/generate-models.ts",
     "generate-image-models": "node scripts/generate-image-models.ts",
-    "build": "node scripts/generate-models.ts && node scripts/generate-image-models.ts && tsc -p tsconfig.json --incremental false",
+    "build": "node ../../scripts/clean-package-dist.cjs && node scripts/generate-models.ts && node scripts/generate-image-models.ts && tsc -p tsconfig.json --incremental false",
     "test": "vitest --run",
     "prepublishOnly": "pnpm run clean && pnpm run build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.91.1",
+    "@anthropic-ai/vertex-sdk": "0.14.4",
     "@aws-sdk/client-bedrock-runtime": "3.1048.0",
     "@smithy/node-http-handler": "4.7.3",
     "@google/genai": "1.52.0",
@@ -106,6 +112,6 @@
   "devDependencies": {
     "@types/node": "24.12.4",
     "canvas": "3.2.3",
-    "vitest": "3.2.4"
+    "vitest": "4.1.0"
   }
 }

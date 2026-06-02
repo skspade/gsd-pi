@@ -91,9 +91,11 @@ import { nativeHasChanges, nativeIsRepo, _resetHasChangesCache } from "./native-
 import { debugLog, isDebugEnabled } from "./debug-logger.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { resolveWorktreeProjectRoot } from "./worktree-root.js";
+import { detectWorktreeName } from "./worktree.js";
 import { probeGitConflictState } from "./git-conflict-state.js";
 import { runTurnGitAction } from "./git-service.js";
 import { parseUnitId } from "./unit-id.js";
+import { resolveExpectedArtifactPath } from "./auto-artifact-paths.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -130,6 +132,15 @@ export interface DispatchContext {
   modelRegistry?: MinimalModelRegistry;
   /** Session model provider, used for provider-specific effective context windows. */
   sessionProvider?: string;
+}
+
+function resolveExistingExpectedArtifact(
+  unitType: string,
+  unitId: string,
+  basePath: string,
+): string | null {
+  const artifactPath = resolveExpectedArtifactPath(unitType, unitId, basePath);
+  return artifactPath && existsSync(artifactPath) ? artifactPath : null;
 }
 
 type ReassessmentChecker = typeof checkNeedsReassessment;
@@ -328,6 +339,29 @@ function isRegistryMilestoneComplete(state: GSDState, mid: string): boolean {
   return state.registry.some((milestone) =>
     milestone.id === mid && milestone.status === "complete"
   );
+}
+
+function normalizeMilestoneScope(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed || !MILESTONE_ID_RE.test(trimmed)) return null;
+  return trimmed;
+}
+
+function resolveDispatchMilestoneScope(
+  ctx: DispatchContext,
+): { id: string; source: string } | null {
+  const sessionMilestone = normalizeMilestoneScope(ctx.session?.currentMilestoneId);
+  if (sessionMilestone) return { id: sessionMilestone, source: "session.currentMilestoneId" };
+
+  const sessionWorktree = normalizeMilestoneScope(
+    ctx.session?.basePath ? detectWorktreeName(ctx.session.basePath) : null,
+  );
+  if (sessionWorktree) return { id: sessionWorktree, source: "session.basePath worktree" };
+
+  const baseWorktree = normalizeMilestoneScope(detectWorktreeName(ctx.basePath));
+  if (baseWorktree) return { id: baseWorktree, source: "basePath worktree" };
+
+  return null;
 }
 
 function hasMilestonePassedDiscuss(basePath: string, mid: string): boolean {
@@ -971,13 +1005,17 @@ export const DISPATCH_RULES: DispatchRule[] = [
       if (await getMilestonePipelineVariant(mid) === "trivial") return null;
 
       // Load roadmap to find all slices
-      const roadmapFile = resolveMilestoneFile(basePath, mid, "ROADMAP");
+      const roadmapFile =
+        resolveExistingExpectedArtifact("plan-milestone", mid, basePath) ??
+        resolveMilestoneFile(basePath, mid, "ROADMAP");
       const roadmapContent = roadmapFile ? await loadFile(roadmapFile) : null;
       if (!roadmapContent) return null;
       const roadmap = parseRoadmap(roadmapContent);
 
       // Find slices that need research (no RESEARCH file, dependencies done)
-      const milestoneResearchFile = resolveMilestoneFile(basePath, mid, "RESEARCH");
+      const milestoneResearchFile =
+        resolveExistingExpectedArtifact("research-milestone", mid, basePath) ??
+        resolveMilestoneFile(basePath, mid, "RESEARCH");
       const researchReadySlices: Array<{ id: string; title: string }> = [];
 
       for (const slice of roadmap.slices) {
@@ -985,10 +1023,10 @@ export const DISPATCH_RULES: DispatchRule[] = [
         // Skip S01 when milestone research exists
         if (milestoneResearchFile && slice.id === "S01") continue;
         // Skip if already has research
-        if (resolveSliceFile(basePath, mid, slice.id, "RESEARCH")) continue;
+        if (resolveExistingExpectedArtifact("research-slice", `${mid}/${slice.id}`, basePath)) continue;
         // Skip if dependencies aren't done (check for SUMMARY files)
         const depsComplete = (slice.depends ?? []).every((depId) =>
-          !!resolveSliceFile(basePath, mid, depId, "SUMMARY"),
+          !!resolveExistingExpectedArtifact("complete-slice", `${mid}/${depId}`, basePath),
         );
         if (!depsComplete) continue;
 
@@ -1001,7 +1039,9 @@ export const DISPATCH_RULES: DispatchRule[] = [
       // #4414: If a previous parallel-research attempt escalated to a blocker
       // placeholder, skip this rule and fall through to per-slice research
       // (or other rules) rather than re-dispatching the same failing unit.
-      const parallelBlocker = resolveMilestoneFile(basePath, mid, "PARALLEL-BLOCKER");
+      const parallelBlocker =
+        resolveExistingExpectedArtifact("research-slice", `${mid}/parallel-research`, basePath) ??
+        resolveMilestoneFile(basePath, mid, "PARALLEL-BLOCKER");
       if (parallelBlocker) return null;
 
       return {
@@ -1030,15 +1070,19 @@ export const DISPATCH_RULES: DispatchRule[] = [
       if (!state.activeSlice) return missingSliceStop(mid, state.phase);
       const sid = state.activeSlice!.id;
       const sTitle = state.activeSlice!.title;
-      const researchFile = resolveSliceFile(basePath, mid, sid, "RESEARCH");
+      const researchFile =
+        resolveExistingExpectedArtifact("research-slice", `${mid}/${sid}`, basePath) ??
+        resolveSliceFile(basePath, mid, sid, "RESEARCH");
       if (researchFile) return null; // has research, fall through
       // Skip slice research for S01 when milestone research already exists —
       // the milestone research already covers the same ground for the first slice.
-      const milestoneResearchFile = resolveMilestoneFile(
-        basePath,
-        mid,
-        "RESEARCH",
-      );
+      const milestoneResearchFile =
+        resolveExistingExpectedArtifact("research-milestone", mid, basePath) ??
+        resolveMilestoneFile(
+          basePath,
+          mid,
+          "RESEARCH",
+        );
       if (milestoneResearchFile && sid === "S01") return null; // fall through to plan-slice
       return {
         action: "dispatch",
@@ -1611,6 +1655,19 @@ import { getRegistry } from "./rule-registry.js";
 export async function resolveDispatch(
   ctx: DispatchContext,
 ): Promise<DispatchAction> {
+  if (ctx.mid && isDbAvailable()) {
+    const milestone = getMilestone(ctx.mid);
+    if (milestone && isClosedStatus(milestone.status)) {
+      return {
+        action: "stop",
+        reason:
+          `Milestone ${ctx.mid} is closed (status: ${milestone.status}); auto-mode will not reopen or recover it implicitly. ` +
+          "Use an explicit reopen command before planning or executing more work for this milestone.",
+        level: "warning",
+      };
+    }
+  }
+
   const activeMid = ctx.state.activeMilestone?.id;
   if (activeMid && ctx.mid !== activeMid) {
     return {
@@ -1618,6 +1675,17 @@ export async function resolveDispatch(
       reason:
         `Dispatch milestone mismatch: context mid "${ctx.mid}" does not match active milestone "${activeMid}". ` +
         "This usually means a project-level deep setup pseudo-id leaked into milestone dispatch; rerun /gsd auto after setup state is reconciled.",
+      level: "warning",
+    };
+  }
+
+  const scopedMilestone = resolveDispatchMilestoneScope(ctx);
+  if (scopedMilestone && ctx.mid !== scopedMilestone.id) {
+    return {
+      action: "stop",
+      reason:
+        `Dispatch milestone mismatch: context mid "${ctx.mid}" does not match ${scopedMilestone.source} "${scopedMilestone.id}". ` +
+        "The active worktree/session and derived project state disagree; recover, park, or discard the stranded milestone before continuing.",
       level: "warning",
     };
   }

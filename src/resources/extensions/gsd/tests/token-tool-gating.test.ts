@@ -4,8 +4,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { registerToolCompatibility } from "@gsd/pi-coding-agent";
+
 import { DISCUSS_TOOLS_ALLOWLIST } from "../constants.ts";
-import { buildMinimalAutoGsdToolSet, buildMinimalGsdToolSet, buildMinimalGsdWorkflowToolSet, buildRequestScopedGsdToolSet, MINIMAL_AUTO_BASE_TOOL_NAMES, MINIMAL_GSD_TOOL_NAMES, restoreGsdWorkflowTools, scopeGsdWorkflowToolsForDispatch } from "../bootstrap/register-hooks.ts";
+import { buildMinimalAutoGsdToolSet, buildMinimalGsdToolSet, buildMinimalGsdWorkflowToolSet, buildRequestScopedGsdToolSet, MINIMAL_AUTO_BASE_TOOL_NAMES, MINIMAL_GSD_TOOL_NAMES, requestHasGsdCustomType, restoreGsdWorkflowTools, scopeGsdWorkflowToolsForDispatch } from "../bootstrap/register-hooks.ts";
+import { filterToolsForProvider } from "../model-router.ts";
+import { applyUnitSkillVisibility } from "../skill-scope.ts";
 
 test("buildMinimalGsdToolSet preserves non-GSD tools and replaces broad GSD surface", () => {
   const result = buildMinimalGsdToolSet([
@@ -30,7 +34,7 @@ test("buildMinimalGsdToolSet preserves non-GSD tools and replaces broad GSD surf
   for (const toolName of MINIMAL_GSD_TOOL_NAMES) {
     assert.ok(result.includes(toolName), `expected ${toolName}`);
   }
-  assert.ok(!result.includes("gsd_plan_milestone"));
+  assert.ok(result.includes("gsd_plan_milestone"));
   assert.ok(!result.includes("gsd_task_complete"));
   assert.ok(!result.includes("gsd_graph"));
 });
@@ -52,6 +56,17 @@ test("buildMinimalGsdToolSet does not reintroduce provider-filtered GSD tools", 
 test("buildMinimalGsdToolSet always preserves ToolSearch shim", () => {
   const result = buildMinimalGsdToolSet(["bash", "read"]);
   assert.ok(result.includes("ToolSearch"));
+});
+
+test("requestHasGsdCustomType detects GSD-driven requests (drives interactive default scoping)", () => {
+  // Plain interactive chat → no gsd-* customType → scoped to the minimal set.
+  assert.equal(requestHasGsdCustomType(undefined), false);
+  assert.equal(requestHasGsdCustomType([]), false);
+  assert.equal(requestHasGsdCustomType([{ customType: "user" }, {}]), false);
+  // GSD workflow commands carry a gsd-* customType → keep their full surface.
+  assert.equal(requestHasGsdCustomType([{ customType: "gsd-quick-task" }]), true);
+  assert.equal(requestHasGsdCustomType([{}, { customType: "gsd-workflow-template" }]), true);
+  assert.equal(requestHasGsdCustomType([{ customType: "gsd-run" }]), true);
 });
 
 test("buildMinimalAutoGsdToolSet keeps unit-specific completion tools without aliases", () => {
@@ -84,6 +99,41 @@ test("buildMinimalAutoGsdToolSet keeps unit-specific completion tools without al
   assert.ok(!result.includes("gsd_complete_task"));
   assert.ok(!result.includes("gsd_slice_complete"));
   assert.ok(!result.includes("gsd_complete_slice"));
+});
+
+test("buildMinimalAutoGsdToolSet scopes run-uat to UAT-specific tools", () => {
+  const active = ["ask_user_questions", "bash", "read", "edit", "write", "gsd_summary_save"];
+  const registered = [
+    ...active,
+    "gsd_uat_exec",
+    "gsd_uat_result_save",
+    "gsd_resume",
+    "gsd_milestone_status",
+    "gsd_journal_query",
+    "gsd_exec",
+    "gsd_save_gate_result",
+    "search-the-web",
+    "browser_navigate",
+    "browser_click",
+    "browser_snapshot_refs",
+  ];
+  const result = buildMinimalAutoGsdToolSet(active, "run-uat", registered);
+  assert.ok(result.includes("gsd_uat_exec"));
+  assert.ok(result.includes("gsd_uat_result_save"));
+  assert.ok(result.includes("gsd_resume"));
+  assert.ok(result.includes("gsd_milestone_status"));
+  assert.ok(result.includes("gsd_journal_query"));
+  assert.ok(result.includes("browser_navigate"), "run-uat needs browser_navigate");
+  assert.ok(result.includes("browser_click"), "run-uat needs browser_click");
+  assert.ok(!result.includes("ToolSearch"));
+  assert.ok(!result.includes("bash"));
+  assert.ok(!result.includes("read"));
+  assert.ok(!result.includes("edit"));
+  assert.ok(!result.includes("write"));
+  assert.ok(!result.includes("gsd_exec"));
+  assert.ok(!result.includes("gsd_summary_save"));
+  assert.ok(!result.includes("gsd_save_gate_result"));
+  assert.ok(!result.includes("search-the-web"));
 });
 
 test("buildMinimalAutoGsdToolSet keeps only the auto base non-GSD tools", () => {
@@ -145,17 +195,27 @@ test("buildMinimalAutoGsdToolSet re-injects registered base tools filtered from 
   assert.ok(result.includes("search-the-web"));
 });
 
-test("buildMinimalAutoGsdToolSet preserves browser tools for run-uat", () => {
+test("buildMinimalAutoGsdToolSet preserves compatible browser add-ons for run-uat", () => {
   const result = buildMinimalAutoGsdToolSet([
     "bash",
     "read",
+    "edit",
+    "write",
     "browser_navigate",
     "browser_click",
     "browser_type",
     "browser_assert",
     "browser_screenshot",
     "browser_wait_for",
+    "gsd_uat_exec",
+    "gsd_uat_result_save",
+    "gsd_resume",
+    "gsd_milestone_status",
+    "gsd_journal_query",
+    "subagent",
     "gsd_summary_save",
+    "gsd_exec",
+    "gsd_save_gate_result",
     "gsd_task_complete",
     "memory_query",
     "capture_thought",
@@ -167,7 +227,86 @@ test("buildMinimalAutoGsdToolSet preserves browser tools for run-uat", () => {
   assert.ok(result.includes("browser_assert"));
   assert.ok(result.includes("browser_screenshot"));
   assert.ok(result.includes("browser_wait_for"));
+  assert.ok(result.includes("gsd_uat_exec"));
+  assert.ok(result.includes("gsd_uat_result_save"));
+  assert.ok(result.includes("subagent"));
+  assert.ok(!result.includes("ToolSearch"));
+  assert.ok(!result.includes("bash"));
+  assert.ok(!result.includes("read"));
+  assert.ok(!result.includes("edit"));
+  assert.ok(!result.includes("write"));
+  assert.ok(!result.includes("gsd_exec"));
+  assert.ok(!result.includes("gsd_summary_save"));
+  assert.ok(!result.includes("gsd_save_gate_result"));
+  assert.ok(!result.includes("gsd_task_complete"));
+});
+
+test("buildMinimalAutoGsdToolSet prefers MCP browser tools for run-uat when available", () => {
+  const result = buildMinimalAutoGsdToolSet([
+    "bash",
+    "read",
+    "browser_navigate",
+    "browser_click",
+    "mcp__gsd-browser__browser_navigate",
+    "mcp__gsd-browser__browser_click",
+    "gsd_summary_save",
+  ], "run-uat");
+
+  assert.ok(result.includes("mcp__gsd-browser__browser_navigate"));
+  assert.ok(result.includes("mcp__gsd-browser__browser_click"));
+  assert.ok(!result.includes("browser_navigate"));
+  assert.ok(!result.includes("browser_click"));
+});
+
+test("buildMinimalAutoGsdToolSet honors provider-compatible registered tools for run-uat", () => {
+  registerToolCompatibility("browser_screenshot", { producesImages: true });
+  const registered = [
+    "bash",
+    "read",
+    "ToolSearch",
+    "browser_navigate",
+    "browser_click",
+    "browser_screenshot",
+    "gsd_uat_exec",
+    "gsd_uat_result_save",
+    "gsd_resume",
+    "gsd_milestone_status",
+    "gsd_journal_query",
+    "gsd_exec",
+    "gsd_summary_save",
+    "gsd_save_gate_result",
+  ];
+  const providerCompatible = filterToolsForProvider(registered, "openai-responses").compatible;
+  const result = buildMinimalAutoGsdToolSet(["gsd_uat_exec"], "run-uat", providerCompatible);
+
+  assert.ok(result.includes("gsd_uat_exec"));
+  assert.ok(result.includes("gsd_uat_result_save"));
+  assert.ok(result.includes("browser_navigate"));
+  assert.ok(result.includes("browser_click"));
+  assert.ok(!result.includes("browser_screenshot"), "provider-filtered screenshot tool must stay filtered");
+  assert.ok(!result.includes("ToolSearch"));
+  assert.ok(!result.includes("bash"));
+  assert.ok(!result.includes("read"));
+  assert.ok(!result.includes("gsd_exec"));
+  assert.ok(!result.includes("gsd_summary_save"));
+  assert.ok(!result.includes("gsd_save_gate_result"));
+});
+
+test("buildMinimalAutoGsdToolSet includes discuss-slice persistence tools", () => {
+  const result = buildMinimalAutoGsdToolSet([
+    "bash",
+    "read",
+    "gsd_summary_save",
+    "gsd_decision_save",
+    "gsd_plan_slice",
+    "gsd_task_complete",
+    "memory_query",
+    "capture_thought",
+  ], "discuss-slice");
+
   assert.ok(result.includes("gsd_summary_save"));
+  assert.ok(result.includes("gsd_decision_save"));
+  assert.ok(!result.includes("gsd_plan_slice"));
   assert.ok(!result.includes("gsd_task_complete"));
 });
 
@@ -434,4 +573,22 @@ test("scopeGsdWorkflowToolsForDispatch applies and restores per-unit skill visib
   ]);
   assert.deepEqual(visibleSkills, ["previous-skill"]);
   assert.equal(calls.filter((call) => call.kind === "skills").length, 2);
+});
+
+test("applyUnitSkillVisibility sets manifest or clears for wildcard", () => {
+  const calls: Array<string[] | undefined> = [];
+  applyUnitSkillVisibility({
+    setVisibleSkills: (names) => {
+      calls.push(names);
+    },
+  }, "plan-milestone");
+  assert.ok(Array.isArray(calls[0]));
+  assert.ok(calls[0]!.includes("tdd"));
+
+  applyUnitSkillVisibility({
+    setVisibleSkills: (names) => {
+      calls.push(names);
+    },
+  }, "execute-task");
+  assert.equal(calls[1], undefined);
 });

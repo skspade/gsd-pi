@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRepositoryRegistryFromPreferences, defaultRepositoryTargets } from "../repository-registry.ts";
@@ -128,4 +128,32 @@ test("repository registry preserves active symlinked worktree root as an executi
   assert.ok(projectRepo.executionRoots.includes(projectRepo.root));
   assert.ok(projectRepo.executionRoots.includes(localWorktree));
   assert.ok(registry.executionRoots.includes(localWorktree));
+});
+
+test("repository registry keeps project root anchored to .gsd project in monorepo subdirectory", (t) => {
+  const monorepo = mkdtempSync(join(tmpdir(), "gsd-repo-registry-mono-"));
+  t.after(() => rmSync(monorepo, { recursive: true, force: true }));
+  execFileSync("git", ["init"], { cwd: monorepo, stdio: "ignore" });
+
+  const subproject = join(monorepo, "fieldkit-tools");
+  mkdirSync(join(subproject, ".gsd"), { recursive: true });
+  writeFileSync(join(subproject, ".gsd", "PREFERENCES.md"), "---\nversion: 1\n---\n");
+
+  const registry = createRepositoryRegistryFromPreferences(subproject, undefined);
+
+  assert.equal(registry.projectRoot, subproject);
+  assert.equal(registry.byId.get("project")?.root, subproject);
+});
+
+test("repository registry uses external-state worktree checkout as project root", (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-repo-registry-external-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const worktree = join(base, ".gsd", "projects", "abc123", "worktrees", "M001");
+  mkdirSync(worktree, { recursive: true });
+  execFileSync("git", ["init"], { cwd: worktree, stdio: "ignore" });
+
+  const registry = createRepositoryRegistryFromPreferences(worktree, undefined);
+
+  assert.equal(registry.projectRoot, realpathSync(worktree));
+  assert.equal(registry.byId.get("project")?.root, realpathSync(worktree));
 });

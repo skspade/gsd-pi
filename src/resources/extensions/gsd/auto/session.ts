@@ -223,6 +223,8 @@ export class AutoSession {
   // ── Isolation degradation ────────────────────────────────────────────
   /** Set to true when worktree creation fails; prevents merge of nonexistent branch. */
   isolationDegraded = false;
+  /** Temporary recovery mode for stranded work adopted from physical git evidence. */
+  strandedRecoveryIsolationMode: "worktree" | "branch" | null = null;
   /** Project-root dirty snapshot captured before an isolated worktree unit runs. */
   rootWriteBaseline: RootDirtySnapshot | null = null;
 
@@ -387,6 +389,7 @@ export class AutoSession {
     this.lastGitActionFailure = null;
     this.lastGitActionStatus = null;
     this.isolationDegraded = false;
+    this.strandedRecoveryIsolationMode = null;
     this.rootWriteBaseline = null;
     this.milestoneMergedInPhases = false;
     this.milestoneStartShas = new Map();

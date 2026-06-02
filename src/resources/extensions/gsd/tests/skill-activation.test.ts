@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadSkills } from "@gsd/pi-coding-agent";
 import {
+  buildCompleteSlicePrompt,
   buildPlanMilestonePrompt,
   buildResearchMilestonePrompt,
   buildSkillActivationBlock,
@@ -138,6 +139,29 @@ test("buildSkillActivationBlock includes skill_rules matches and task-plan skill
 
     assert.match(result, /Call Skill\(\{ skill: 'accessibility' \}\)/);
     assert.match(result, /Call Skill\(\{ skill: 'prisma' \}\)/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("buildSkillActivationBlock matches skill_rules against exact unit type context", () => {
+  const base = makeTempBase();
+  try {
+    writeSkill(base, "complete-slice-policies", "Use for complete-slice closeout policy checks.");
+    writeSkill(base, "slice-broad", "Use for broad slice work.");
+    loadOnlyTestSkills(base);
+
+    const result = buildBlock(base, {
+      unitType: "complete-slice",
+    }, {
+      skill_rules: [
+        { when: "complete-slice", use: ["complete-slice-policies"] },
+        { when: "slice", use: ["slice-broad"] },
+      ],
+    });
+
+    assert.match(result, /Call Skill\(\{ skill: 'complete-slice-policies' \}\)/);
+    assert.doesNotMatch(result, /slice-broad/);
   } finally {
     cleanup(base);
   }
@@ -323,6 +347,37 @@ test("milestone prompt builders propagate always_use_skills through buildSkillAc
     const planPrompt = await buildPlanMilestonePrompt("M001", "Test", base);
     assert.match(planPrompt, /Call Skill\(\{ skill: 'write-docs' \}\)/);
     assert.match(planPrompt, /Call Skill\(\{ skill: 'swiftui' \}\)/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("complete-slice prompt propagates always_use_skills through buildSkillActivationBlock", async () => {
+  const base = makeTempBase();
+  try {
+    writeSkill(base, "write-docs", "Use when writing docs or RFCs.");
+    writeProjectPreferences(base, "always_use_skills:\n  - write-docs\n");
+    loadOnlyTestSkills(base);
+
+    const milestoneDir = join(base, ".gsd", "milestones", "M001");
+    const sliceDir = join(milestoneDir, "slices", "S01");
+    mkdirSync(sliceDir, { recursive: true });
+    writeFileSync(
+      join(milestoneDir, "M001-ROADMAP.md"),
+      [
+        "# M001: Test",
+        "",
+        "## Slices",
+        "",
+        "- [ ] **S01: Slice** `risk:low` `depends:[]`",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(join(sliceDir, "S01-PLAN.md"), "# S01: Slice\n\n## Tasks\n\n- [x] **T01: Done**\n");
+
+    const prompt = await buildCompleteSlicePrompt("M001", "Test", "S01", "Slice", base);
+
+    assert.match(prompt, /Call Skill\(\{ skill: 'write-docs' \}\)/);
   } finally {
     cleanup(base);
   }

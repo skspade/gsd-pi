@@ -53,6 +53,24 @@ test('runExecSandbox: captures stdout, persists artifacts, returns digest', asyn
   }
 });
 
+test('runExecSandbox: persists optional request metadata', async () => {
+  const base = freshBase();
+  try {
+    const result = await runExecSandbox(
+      {
+        runtime: 'bash',
+        script: 'echo metadata-ok',
+        metadata: { kind: 'uat_exec', intent: 'uat-artifact-check' },
+      },
+      baseOpts(base),
+    );
+    const meta = JSON.parse(readFileSync(result.meta_path, 'utf-8')) as Record<string, unknown>;
+    assert.deepEqual(meta.metadata, { kind: 'uat_exec', intent: 'uat-artifact-check' });
+  } finally {
+    cleanup(base);
+  }
+});
+
 test('runExecSandbox: enforces stdout cap and marks truncation', async () => {
   const base = freshBase();
   try {
@@ -236,6 +254,36 @@ test('executeGsdExec: enforces per-call timeout override end-to-end', async () =
     );
     assert.equal(result.details.timed_out, true);
     assert.equal(result.isError, true);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('executeGsdExec: defaults to bash and accepts command alias', async () => {
+  const base = freshBase();
+  try {
+    const result = await executeGsdExec(
+      { command: 'echo command-alias-defaults-to-bash' },
+      { baseDir: base, preferences: { context_mode: { enabled: true } } },
+    );
+    assert.equal(result.isError, false);
+    assert.equal(result.details.runtime, 'bash');
+    assert.ok(result.content[0].text.includes('command-alias-defaults-to-bash'));
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('executeGsdExec: accepts common runtime aliases', async () => {
+  const base = freshBase();
+  try {
+    const result = await executeGsdExec(
+      { runtime: 'js', code: 'console.log("runtime-alias-node")' },
+      { baseDir: base, preferences: { context_mode: { enabled: true } } },
+    );
+    assert.equal(result.isError, false);
+    assert.equal(result.details.runtime, 'node');
+    assert.ok(result.content[0].text.includes('runtime-alias-node'));
   } finally {
     cleanup(base);
   }

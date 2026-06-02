@@ -27,11 +27,24 @@ import { homedir } from "node:os";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { PartialMessageBuilder, ZERO_USAGE, mapUsage } from "./partial-builder.js";
-import { buildWorkflowMcpServers, resolveWorkflowMcpProjectRoot } from "../gsd/workflow-mcp.js";
+import {
+	buildWorkflowMcpServers,
+	getRequiredWorkflowToolsForAutoUnit,
+	resolveWorkflowMcpProjectRoot,
+} from "../gsd/workflow-mcp.js";
+import { buildProjectGsdMcpServers, ensureProjectWorkflowMcpConfig } from "../gsd/mcp-project-config.js";
 import { loadProjectGSDPreferences } from "../gsd/preferences.js";
-import { discoverMcpServerNames, computeMcpDisallowedTools } from "../gsd/mcp-filter.js";
+import {
+	discoverBrowserMcpServerName,
+	discoverMcpServers,
+	discoverMcpServerNames,
+	discoverWorkflowMcpServerName,
+	computeMcpDisallowedTools,
+} from "../gsd/mcp-filter.js";
+import { RUN_UAT_CLAUDE_NATIVE_TOOL_NAMES, RUN_UAT_FORBIDDEN_TOOL_NAMES, RUN_UAT_WORKFLOW_TOOL_NAMES, resolveToolPresentationPlan } from "../gsd/tool-presentation-plan.js";
 import { showInterviewRound, type Question, type RoundResult } from "../shared/tui.js";
 import type {
+	BetaRawMessageStreamEvent,
 	SDKAssistantMessage,
 	SDKMessage,
 	SDKPartialAssistantMessage,
@@ -58,6 +71,11 @@ export interface ExternalToolResultPayload {
 type ToolCallWithExternalResult = ToolCall & {
 	externalResult?: ExternalToolResultPayload;
 };
+
+interface PromptToolContextOptions {
+	workflowMcpServerName?: string | null;
+	browserMcpServerName?: string | null;
+}
 
 /** `SimpleStreamOptions` extended with an optional extension UI context for elicitation dialogs. */
 interface ClaudeCodeStreamOptions extends SimpleStreamOptions {
@@ -317,6 +335,33 @@ function extractMessageText(msg: { role: string; content: unknown }): string {
 	return "";
 }
 
+const GSD_PHASE_PATTERNS: Array<[string, RegExp]> = [
+	["run-uat", /\b(?:UNIT:\s*Run UAT|run-uat)\b/i],
+	["complete-milestone", /\b(?:UNIT:\s*Complete Milestone|complete-milestone)\b/i],
+	["validate-milestone", /\b(?:UNIT:\s*Validate Milestone|validate-milestone)\b/i],
+	["reassess-roadmap", /\b(?:UNIT:\s*Reassess Roadmap|reassess-roadmap)\b/i],
+	["complete-slice", /\b(?:UNIT:\s*Complete Slice|complete-slice)\b/i],
+	["replan-slice", /\b(?:UNIT:\s*Replan Slice|replan-slice)\b/i],
+	["plan-slice", /\b(?:UNIT:\s*Plan Slice|plan-slice|gsd_plan_slice)\b/i],
+	["plan-milestone", /\b(?:UNIT:\s*Plan Milestone|plan-milestone|gsd_plan_milestone)\b/i],
+	["execute-task", /\b(?:UNIT:\s*Execute Task|execute-task|execute-task-simple|reactive-execute)\b/i],
+	["gate-evaluate", /\b(?:UNIT:\s*Gate Evaluate|gate-evaluate|gsd_save_gate_result)\b/i],
+	["research-milestone", /\b(?:UNIT:\s*Research Milestone|research-milestone)\b/i],
+	["research-slice", /\b(?:UNIT:\s*Research Slice|research-slice)\b/i],
+	["discuss-milestone", /\b(?:Discuss milestone|discuss-milestone)\b/i],
+];
+
+export function inferGsdPhaseFromContext(context: Context): string | undefined {
+	const text = [
+		context.systemPrompt ?? "",
+		...context.messages.map((message) => extractMessageText(message)),
+	].join("\n");
+	for (const [phase, pattern] of GSD_PHASE_PATTERNS) {
+		if (pattern.test(text)) return phase;
+	}
+	return undefined;
+}
+
 /**
  * Build a full conversational prompt from GSD's context messages.
  *
@@ -331,7 +376,7 @@ function extractMessageText(msg: { role: string; content: unknown }): string {
  * user turns in its own output. XML tags read as document structure and
  * don't get mirrored in free text.
  */
-export function buildPromptFromContext(context: Context): string {
+export function buildPromptFromContext(context: Context, toolContext: PromptToolContextOptions = {}): string {
 	const hasContent = Boolean(context.systemPrompt) || context.messages.some((m) => extractMessageText(m));
 	if (!hasContent) return "";
 
@@ -339,6 +384,21 @@ export function buildPromptFromContext(context: Context): string {
 		"Respond only to the final user message below. " +
 			"Do not emit <user_message>, <assistant_message>, or <prior_system_context> tags in your response.",
 	];
+	const workflowToolLine = toolContext.workflowMcpServerName
+		? "- GSD workflow tools (gsd_exec, gsd_slice_complete, gsd_task_complete, gsd_plan_slice, gsd_save_gate_result, etc.) " +
+			`are MCP tools — call them as mcp__${toolContext.workflowMcpServerName}__<tool_name> ` +
+			`(e.g. mcp__${toolContext.workflowMcpServerName}__gsd_exec, mcp__${toolContext.workflowMcpServerName}__gsd_save_gate_result)\n`
+		: "- GSD workflow MCP tools are unavailable in this Claude Code run.\n";
+	const toolSearchLine = toolContext.workflowMcpServerName
+		? "- ToolSearch is NOT available — never use it to discover tools; invoke the MCP tool directly\n"
+		: "- ToolSearch is NOT available — never use it to discover tools\n";
+	const browserToolLine = toolContext.browserMcpServerName
+		? "- Browser verification uses gsd-browser MCP by default — call browser tools as " +
+			`mcp__${toolContext.browserMcpServerName}__<browser_tool_name> ` +
+			`(e.g. mcp__${toolContext.browserMcpServerName}__browser_snapshot_refs, mcp__${toolContext.browserMcpServerName}__browser_assert). ` +
+			"Do not call pi-native browser_* names directly.\n"
+		: "- Pi/GSD browser_* tools from prior context (for example browser_navigate, browser_find, browser_evaluate, browser_close) are not Claude Code tools. " +
+			"Never use ToolSearch to select browser_* tools; for browser verification, use Bash to run a local Playwright/Node check unless an explicit browser MCP tool is already listed.\n";
 
 	// The prior system context lists pi-native tool names (lowercase: bash, read, gsd_exec, etc.)
 	// but this process runs inside Claude Code where tool names differ. Inject a remapping note
@@ -349,10 +409,9 @@ export function buildPromptFromContext(context: Context): string {
 			"You are running inside Claude Code. Use these exact tool names — do not use lowercase or pi-native names:\n" +
 			"- Shell commands: 'Bash' (not 'bash')\n" +
 			"- File operations: 'Read', 'Write', 'Edit', 'Glob', 'Grep' (PascalCase, not lowercase)\n" +
-			"- GSD workflow tools (gsd_exec, gsd_slice_complete, gsd_task_complete, gsd_plan_slice, gsd_save_gate_result, etc.) " +
-			"are MCP tools — call them as mcp__gsd-workflow__<tool_name> " +
-			"(e.g. mcp__gsd-workflow__gsd_exec, mcp__gsd-workflow__gsd_save_gate_result)\n" +
-			"- ToolSearch is NOT available — never use it to discover tools; invoke the MCP tool directly\n" +
+			workflowToolLine +
+			browserToolLine +
+			toolSearchLine +
 			"</tool_context>",
 	);
 
@@ -1441,6 +1500,115 @@ function mapThinkingLevelToAnthropicEffort(level: ThinkingLevel | undefined, mod
 	}
 }
 
+function parseAllowedMcpToolName(toolName: string): { server: string; tool: string } | undefined {
+	const match = /^mcp__(.+)__(\*|[^*]+)$/.exec(toolName);
+	return match?.[1] && match[2] ? { server: match[1], tool: match[2] } : undefined;
+}
+
+function browserMcpServerNameFromAllowedTools(allowedTools: unknown): string | undefined {
+	if (!Array.isArray(allowedTools)) return undefined;
+	for (const toolName of allowedTools) {
+		if (typeof toolName !== "string") continue;
+		const parsed = parseAllowedMcpToolName(toolName);
+		if (!parsed) continue;
+		if (parsed.server === "gsd-browser" || parsed.tool.startsWith("browser_")) {
+			return parsed.server;
+		}
+	}
+	return undefined;
+}
+
+function workflowMcpServerNameFromAllowedTools(allowedTools: unknown): string | undefined {
+	if (!Array.isArray(allowedTools)) return undefined;
+	const browserServerName = browserMcpServerNameFromAllowedTools(allowedTools);
+	for (const toolName of allowedTools) {
+		if (typeof toolName !== "string") continue;
+		const parsed = parseAllowedMcpToolName(toolName);
+		if (!parsed || parsed.server === browserServerName || parsed.tool.startsWith("browser_")) continue;
+		return parsed.server;
+	}
+	return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+	return isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
+}
+
+function cloneSdkMcpServerConfig(config: unknown): Record<string, unknown> | undefined {
+	if (!isRecord(config)) return undefined;
+	const cloned: Record<string, unknown> = {};
+	for (const key of ["type", "command", "cwd", "url"] as const) {
+		if (typeof config[key] === "string") cloned[key] = config[key];
+	}
+	if (Array.isArray(config.args)) {
+		cloned.args = config.args.filter((arg): arg is string => typeof arg === "string");
+	}
+	if (isStringRecord(config.env)) cloned.env = { ...config.env };
+	if (isStringRecord(config.headers)) cloned.headers = { ...config.headers };
+	if (isRecord(config.oauth)) cloned.oauth = { ...config.oauth };
+	return Object.keys(cloned).length > 0 ? cloned : undefined;
+}
+
+function resolveProjectMcpServerConfig(
+	projectRoot: string,
+	serverName: string | undefined,
+	fallbackServers?: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+	if (!serverName) return undefined;
+	const projectServer = discoverMcpServers(projectRoot).find((server) => server.name === serverName);
+	return cloneSdkMcpServerConfig(projectServer?.config) ?? cloneSdkMcpServerConfig(fallbackServers?.[serverName]);
+}
+
+function resolveProjectMcpServerConfigs(
+	projectRoot: string,
+	serverNames: readonly (string | undefined)[],
+	fallbackServers?: Record<string, unknown>,
+): Record<string, Record<string, unknown>> | undefined {
+	const resolved: Record<string, Record<string, unknown>> = {};
+	for (const serverName of serverNames) {
+		const serverConfig = resolveProjectMcpServerConfig(projectRoot, serverName, fallbackServers);
+		if (serverName && serverConfig) resolved[serverName] = serverConfig;
+	}
+	return Object.keys(resolved).length > 0 ? resolved : undefined;
+}
+
+function resolveExactWorkflowMcpToolsForPhase(
+	gsdPhase: string | undefined,
+	workflowServerName: string | undefined,
+	workflowExplicitlyBlocked: boolean,
+): string[] {
+	if (!gsdPhase || !workflowServerName || workflowExplicitlyBlocked) return [];
+	const requiredTools = gsdPhase === "run-uat"
+		? [...RUN_UAT_WORKFLOW_TOOL_NAMES]
+		: getRequiredWorkflowToolsForAutoUnit(gsdPhase);
+	const supportTools = gsdPhase === "run-uat" ? [] : ["gsd_milestone_status"];
+	const requestedToolNames = [...new Set([...requiredTools, ...supportTools])];
+	if (requestedToolNames.length === 0) return [];
+	return resolveToolPresentationPlan({
+		phase: gsdPhase,
+		surface: "claude-code-sdk",
+		workflowMcpServerName: workflowServerName,
+		requestedToolNames,
+	}).presentedToolNames;
+}
+
+export function autoInitClaudeCodeWorkflowMcp(cwd: string): void {
+	const projectRoot = resolveWorkflowMcpProjectRoot(cwd);
+	try {
+		ensureProjectWorkflowMcpConfig(projectRoot);
+	} catch (err) {
+		if (process.env.GSD_DEBUG === "1") {
+			console.warn(
+				`[claude-code] workflow MCP auto-init failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+}
+
 /**
  * Build the options object passed to the Claude Agent SDK's `query()` call.
  *
@@ -1456,37 +1624,76 @@ export function buildSdkOptions(
 	modelId: string,
 	prompt: string,
 	overrides?: { permissionMode?: "bypassPermissions" | "acceptEdits" | "default" | "plan" },
-	extraOptions: Record<string, unknown> & { reasoning?: ThinkingLevel } = {},
+	extraOptions: Record<string, unknown> & { reasoning?: ThinkingLevel; gsdPhase?: string } = {},
 ): Record<string, unknown> {
-	const { reasoning, cwd, ...sdkExtraOptions } = extraOptions;
+	const { reasoning, cwd, gsdPhase, ...sdkExtraOptions } = extraOptions;
 	const sdkCwd = typeof cwd === "string" && cwd.trim().length > 0 ? cwd : process.cwd();
 	// Claude Code runs in the milestone worktree for file/shell work, but workflow MCP
 	// config (.mcp.json) and server discovery live at the project root.
 	const projectRoot = resolveWorkflowMcpProjectRoot(sdkCwd);
-	const mcpServers = buildWorkflowMcpServers(projectRoot);
+	const defaultMcpServers: {
+		servers: Record<string, unknown>;
+		workflowServerName: string | undefined;
+		browserServerName: string | undefined;
+	} = (() => {
+		try {
+			return buildProjectGsdMcpServers(projectRoot);
+		} catch {
+			const workflowServers = buildWorkflowMcpServers(projectRoot) ?? {};
+			const workflowServerName = Object.keys(workflowServers)[0];
+			return { servers: workflowServers, workflowServerName, browserServerName: undefined };
+		}
+	})();
 	const permissionMode = overrides?.permissionMode ?? "bypassPermissions";
 
 	const preferences = loadProjectGSDPreferences(projectRoot);
 	const mcpConfig = preferences?.preferences.claude_code_mcp;
-	const workflowServerName = mcpServers ? Object.keys(mcpServers)[0] : undefined;
 
 	// Always discover project MCPs — needed for both duplicate detection and filtering.
 	const discovered = discoverMcpServerNames(projectRoot);
+	const injectedWorkflowServerName = defaultMcpServers.workflowServerName;
+	const injectedBrowserServerName = defaultMcpServers.browserServerName;
+	const projectWorkflowServerName = discoverWorkflowMcpServerName(projectRoot);
+	const projectBrowserServerName = discoverBrowserMcpServerName(projectRoot);
+	const workflowServerName = projectWorkflowServerName ?? injectedWorkflowServerName;
+	const browserServerName = projectBrowserServerName ?? injectedBrowserServerName;
 
-	// If the workflow MCP is already declared in the project's .mcp.json or
-	// .claude/settings.json, do not inject it again via mcpServers. Passing the
+	// If a default GSD MCP server is already declared in the project's .mcp.json
+	// or .claude/settings.json, do not inject it again via mcpServers. Passing the
 	// same server name from two sources causes a duplicate registration conflict
 	// that prevents the MCP server from loading (tools become unavailable).
-	const workflowAlreadyInProject = workflowServerName !== undefined && discovered.includes(workflowServerName);
-	let filteredMcpServers = workflowAlreadyInProject ? undefined : mcpServers;
+	const workflowAlreadyInProject = projectWorkflowServerName !== undefined
+		|| (injectedWorkflowServerName !== undefined && discovered.includes(injectedWorkflowServerName));
+	const browserAlreadyInProject = projectBrowserServerName !== undefined
+		|| (injectedBrowserServerName !== undefined && discovered.includes(injectedBrowserServerName));
+	const mcpServersToInject = { ...defaultMcpServers.servers };
+	if (workflowAlreadyInProject && injectedWorkflowServerName) delete mcpServersToInject[injectedWorkflowServerName];
+	if (browserAlreadyInProject && injectedBrowserServerName) delete mcpServersToInject[injectedBrowserServerName];
+	let filteredMcpServers: Record<string, unknown> | undefined =
+		Object.keys(mcpServersToInject).length > 0 ? mcpServersToInject : undefined;
 	let extraDisallowedTools: string[] = [];
 	let workflowExplicitlyBlocked = false;
+	let browserExplicitlyBlocked = false;
 
 	if (mcpConfig) {
-		extraDisallowedTools = computeMcpDisallowedTools(modelId, mcpConfig, discovered, workflowServerName);
+		const filterServerNames = [
+			...discovered,
+			...(workflowServerName ? [workflowServerName] : []),
+			...(browserServerName ? [browserServerName] : []),
+		];
+		extraDisallowedTools = computeMcpDisallowedTools(modelId, mcpConfig, filterServerNames, workflowServerName);
 		if (workflowServerName && extraDisallowedTools.includes(`mcp__${workflowServerName}__*`)) {
-			filteredMcpServers = undefined;
 			workflowExplicitlyBlocked = true;
+		}
+		if (browserServerName && extraDisallowedTools.includes(`mcp__${browserServerName}__*`)) {
+			browserExplicitlyBlocked = true;
+		}
+		if (filteredMcpServers) {
+			for (const blockedPattern of extraDisallowedTools) {
+				const match = /^mcp__(.+)__\*$/.exec(blockedPattern);
+				if (match?.[1]) delete filteredMcpServers[match[1]];
+			}
+			if (Object.keys(filteredMcpServers).length === 0) filteredMcpServers = undefined;
 		}
 	}
 
@@ -1495,13 +1702,54 @@ export function buildSdkOptions(
 	// Claude Code's native `AskUserQuestion`; the MCP path carries stable IDs and
 	// routes responses through the GSD elicitation bridge.
 	// Opt back into gated mode with GSD_CLAUDE_CODE_PERMISSION_MODE=acceptEdits.
-	// Include the workflow pattern in allowedTools whether the server is GSD-injected
-	// or declared in the project config — but not if explicitly blocked by user prefs.
-	const workflowMcpTools = filteredMcpServers
-		? Object.keys(filteredMcpServers).map((serverName) => `mcp__${serverName}__*`)
-		: (!workflowExplicitlyBlocked && workflowServerName ? [`mcp__${workflowServerName}__*`] : []);
-	const disallowedTools: string[] = [...(workflowMcpTools.length > 0 ? ["AskUserQuestion"] : []), ...extraDisallowedTools];
-	const allowedTools = [
+	// Include GSD-managed MCP patterns in allowedTools whether the server is
+	// injected or declared in project config, but not if blocked by user prefs.
+	const workflowMcpTools = !workflowExplicitlyBlocked && workflowServerName
+		? [`mcp__${workflowServerName}__*`]
+		: [];
+	const browserMcpTools = !browserExplicitlyBlocked && browserServerName
+		? [`mcp__${browserServerName}__*`]
+		: [];
+	const phaseUsesBrowserMcp = !gsdPhase || gsdPhase === "run-uat";
+	const allowedBrowserMcpTools = phaseUsesBrowserMcp ? browserMcpTools : [];
+	const inlinePhaseMcpServers = gsdPhase
+		? resolveProjectMcpServerConfigs(
+				projectRoot,
+				[
+					workflowExplicitlyBlocked ? undefined : workflowServerName,
+					phaseUsesBrowserMcp && !browserExplicitlyBlocked ? browserServerName : undefined,
+				],
+				defaultMcpServers.servers,
+			)
+		: undefined;
+	const sdkMcpServers = inlinePhaseMcpServers ?? filteredMcpServers;
+	const strictMcpConfig = !!inlinePhaseMcpServers;
+	// Strict phase configs inline the exact MCP servers GSD needs. Loading
+	// project/local settings at the same time can duplicate those servers and
+	// leave allowed mcp__... tools with no registered backing tool.
+	const settingSources = strictMcpConfig ? [] : ["project", "local"];
+	const exactWorkflowMcpTools = resolveExactWorkflowMcpToolsForPhase(
+		gsdPhase,
+		workflowServerName,
+		workflowExplicitlyBlocked,
+	);
+	const runUatDisallowedTools = gsdPhase === "run-uat" && workflowServerName
+		? [
+				...RUN_UAT_FORBIDDEN_TOOL_NAMES.filter((toolName) => !toolName.startsWith("mcp__")),
+				"WebFetch",
+				"Agent",
+				`mcp__${workflowServerName}__gsd_exec`,
+				`mcp__${workflowServerName}__gsd_summary_save`,
+				`mcp__${workflowServerName}__gsd_save_gate_result`,
+			]
+		: [];
+	const disallowedTools: string[] = [...new Set([
+		"ToolSearch",
+		...(workflowMcpTools.length > 0 || exactWorkflowMcpTools.length > 0 ? ["AskUserQuestion"] : []),
+		...runUatDisallowedTools,
+		...extraDisallowedTools,
+	])];
+	const standardClaudeTools = [
 		"Read",
 		"Write",
 		"Edit",
@@ -1511,8 +1759,19 @@ export function buildSdkOptions(
 		"Agent",
 		"WebFetch",
 		"WebSearch",
-		...(workflowMcpTools.length > 0 ? workflowMcpTools : ["AskUserQuestion"]),
 	];
+	const allowedTools = gsdPhase === "run-uat"
+		? [
+				...RUN_UAT_CLAUDE_NATIVE_TOOL_NAMES,
+				...(exactWorkflowMcpTools.length > 0 ? exactWorkflowMcpTools : []),
+				...allowedBrowserMcpTools,
+			]
+		: [
+				...standardClaudeTools,
+				...exactWorkflowMcpTools,
+				...(workflowMcpTools.length > 0 ? workflowMcpTools : ["AskUserQuestion"]),
+				...allowedBrowserMcpTools,
+			];
 	const supportsAdaptive = modelSupportsAdaptiveThinking(modelId);
 	const effort =
 		reasoning && supportsAdaptive
@@ -1536,11 +1795,12 @@ export function buildSdkOptions(
 		cwd: sdkCwd,
 		permissionMode,
 		allowDangerouslySkipPermissions: permissionMode === "bypassPermissions",
-		settingSources: ["project"],
+		settingSources,
 		systemPrompt: { type: "preset", preset: "claude_code" },
 		disallowedTools,
 		...(allowedTools.length > 0 ? { allowedTools } : {}),
-		...(filteredMcpServers ? { mcpServers: filteredMcpServers } : {}),
+		...(sdkMcpServers ? { mcpServers: sdkMcpServers } : {}),
+		...(strictMcpConfig ? { strictMcpConfig: true } : {}),
 		betas: (
 			modelId.includes("sonnet")
 			|| modelId.includes("opus-4-7")
@@ -1790,6 +2050,25 @@ export function mergePendingToolCalls(
 	return intermediate;
 }
 
+export function handleClaudeCodePartialStreamEvent(
+	builder: PartialMessageBuilder | null,
+	event: BetaRawMessageStreamEvent,
+	modelId: string,
+): { builder: PartialMessageBuilder | null; assistantEvent: AssistantMessageEvent | null } {
+	if (event.type === "message_start") {
+		// Claude Code can emit repeated SDK message_start events inside one
+		// logical assistant response. Keep appending until a synthetic user
+		// tool-result boundary explicitly clears the builder.
+		return {
+			builder: builder ?? new PartialMessageBuilder((event as any).message?.model ?? modelId),
+			assistantEvent: null,
+		};
+	}
+
+	if (!builder) return { builder, assistantEvent: null };
+	return { builder, assistantEvent: builder.handleEvent(event) };
+}
+
 // ---------------------------------------------------------------------------
 // streamSimple implementation
 // ---------------------------------------------------------------------------
@@ -1847,13 +2126,13 @@ async function pumpSdkMessages(
 			options.signal.addEventListener("abort", () => controller.abort(), { once: true });
 		}
 
-		const prompt = buildPromptFromContext(context);
-		const queryPrompt = buildSdkQueryPrompt(context, prompt);
 		const permissionMode = await resolveClaudePermissionMode();
 		const uiContext = (options as ClaudeCodeStreamOptions | undefined)?.extensionUIContext;
 		const onExternalToolCall = (options as ClaudeCodeStreamOptions | undefined)?.onExternalToolCall;
 		const onExternalToolResult = (options as ClaudeCodeStreamOptions | undefined)?.onExternalToolResult;
 		const cwd = resolveClaudeCodeCwd(options);
+		autoInitClaudeCodeWorkflowMcp(cwd);
+		const gsdPhase = inferGsdPhaseFromContext(context);
 		const canUseToolHandler = createClaudeCodeCanUseToolHandler(uiContext);
 		// When no UI is available (headless / auto-mode), auto-approve all
 		// tool requests. This replaces the old bypassPermissions workaround.
@@ -1862,10 +2141,11 @@ async function pumpSdkMessages(
 				({ behavior: "allow", toolUseID: opts.toolUseID }));
 		const sdkOpts = buildSdkOptions(
 			modelId,
-			prompt,
+			"",
 			{ permissionMode },
 			{
 				cwd,
+				gsdPhase,
 				reasoning: options?.reasoning,
 				canUseTool: canUseToolFallback,
 				...(uiContext
@@ -1875,6 +2155,11 @@ async function pumpSdkMessages(
 					: {}),
 			},
 		);
+		const prompt = buildPromptFromContext(context, {
+			workflowMcpServerName: workflowMcpServerNameFromAllowedTools(sdkOpts.allowedTools),
+			browserMcpServerName: browserMcpServerNameFromAllowedTools(sdkOpts.allowedTools),
+		});
+		const queryPrompt = buildSdkQueryPrompt(context, prompt);
 
 		const queryResult = sdk.query({
 			prompt: queryPrompt,
@@ -1923,32 +2208,24 @@ async function pumpSdkMessages(
 
 					const event = partial.event;
 
-					// New assistant turn starts with message_start
-					if (event.type === "message_start") {
-						builder = new PartialMessageBuilder(
-							(event as any).message?.model ?? modelId,
-						);
-						break;
-					}
-
-					if (!builder) break;
-
-						const assistantEvent = builder.handleEvent(event);
-						if (assistantEvent) {
-							stream.push(assistantEvent);
-							if (assistantEvent.type === "toolcall_start") {
-								const toolBlock = assistantEvent.partial.content[assistantEvent.contentIndex];
-								if (toolBlock?.type === "toolCall") {
-									try {
-										await onExternalToolCall?.(toolBlock);
-									} catch (error) {
-										console.warn("[claude-code] onExternalToolCall callback failed:", error);
-									}
+					const result = handleClaudeCodePartialStreamEvent(builder, event, modelId);
+					builder = result.builder;
+					const assistantEvent = result.assistantEvent;
+					if (assistantEvent) {
+						stream.push(assistantEvent);
+						if (assistantEvent.type === "toolcall_start") {
+							const toolBlock = assistantEvent.partial.content[assistantEvent.contentIndex];
+							if (toolBlock?.type === "toolCall") {
+								try {
+									await onExternalToolCall?.(toolBlock);
+								} catch (error) {
+									console.warn("[claude-code] onExternalToolCall callback failed:", error);
 								}
 							}
 						}
-						break;
 					}
+					break;
+				}
 
 				// -- Complete assistant message (non-streaming fallback) --
 				case "assistant": {

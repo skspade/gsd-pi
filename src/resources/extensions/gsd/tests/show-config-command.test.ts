@@ -10,6 +10,7 @@ import { join } from "node:path";
 
 import { GSDConfigOverlay, formatConfigText } from "../config-overlay.ts";
 import { handleCoreCommand } from "../commands/handlers/core.ts";
+import { assertFullOuterBorder } from "./tui-border-assertions.ts";
 
 const theme = {
   bold: (s: string) => s,
@@ -48,6 +49,9 @@ test("GSDConfigOverlay renders and responds to input", () => {
 
   const lines = overlay.render(60);
   assert.ok(lines.some((line) => line.includes("GSD Configuration")));
+  assertFullOuterBorder(lines, 60);
+  assert.match(lines[0] ?? "", /^╭─ GSD Configuration /);
+  assert.match(lines.at(-1) ?? "", /^╰─+╯$/);
 
   overlay.handleInput("j");
   assert.equal(renderRequests, 1);

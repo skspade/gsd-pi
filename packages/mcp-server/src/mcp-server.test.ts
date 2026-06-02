@@ -18,6 +18,7 @@ import { delimiter, join, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
 
 import { SessionManager } from './session-manager.js';
+import { installGlobalErrorHandlers } from './cli-errors.js';
 import {
   askUserQuestionsHandler,
   buildAskUserQuestionsElicitRequest,
@@ -27,6 +28,29 @@ import {
 } from './server.js';
 import { MAX_EVENTS } from './types.js';
 import type { ManagedSession, CostAccumulator, PendingBlocker } from './types.js';
+
+describe('installGlobalErrorHandlers', () => {
+  it('logs uncaught exceptions and unhandled rejections to stderr', () => {
+    const writes: string[] = [];
+    const runtime = new EventEmitter() as EventEmitter & {
+      stderr: { write(message: string): boolean };
+    };
+    runtime.stderr = {
+      write(message: string): boolean {
+        writes.push(message);
+        return true;
+      },
+    };
+
+    installGlobalErrorHandlers(runtime);
+    runtime.emit('uncaughtException', new Error('boom'));
+    runtime.emit('unhandledRejection', 'bad rejection');
+
+    const output = writes.join('');
+    assert.match(output, /\[gsd-mcp-server\] Uncaught exception: Error: boom/);
+    assert.match(output, /\[gsd-mcp-server\] Unhandled rejection: bad rejection/);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Mock RpcClient (duck-typed to match RpcClient interface)
@@ -674,6 +698,35 @@ describe('createMcpServer tool registration', () => {
     assert.ok(typeof server.close === 'function');
   });
 
+  it('advertises workflow aliases by default for external MCP clients', async () => {
+    const previous = process.env.GSD_MCP_HIDE_ALIASES;
+    delete process.env.GSD_MCP_HIDE_ALIASES;
+    try {
+      const { server } = await createMcpServer(sm);
+      const registeredTools = (server as any)._registeredTools ?? {};
+      for (const alias of ['gsd_save_summary', 'gsd_milestone_plan', 'gsd_slice_plan']) {
+        assert.ok(registeredTools[alias], `${alias} should be advertised by default`);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.GSD_MCP_HIDE_ALIASES;
+      else process.env.GSD_MCP_HIDE_ALIASES = previous;
+    }
+  });
+
+  it('can hide workflow aliases when explicitly requested', async () => {
+    const previous = process.env.GSD_MCP_HIDE_ALIASES;
+    process.env.GSD_MCP_HIDE_ALIASES = '1';
+    try {
+      const { server } = await createMcpServer(sm);
+      const registeredTools = (server as any)._registeredTools ?? {};
+      assert.ok(registeredTools.gsd_summary_save, 'canonical tool should remain advertised');
+      assert.equal(registeredTools.gsd_save_summary, undefined);
+    } finally {
+      if (previous === undefined) delete process.env.GSD_MCP_HIDE_ALIASES;
+      else process.env.GSD_MCP_HIDE_ALIASES = previous;
+    }
+  });
+
   it('gsd_execute flow returns sessionId on success', async () => {
     const sessionId = await sm.startSession('/tmp/tool-exec', { cliPath: '/usr/bin/gsd' });
     assert.equal(typeof sessionId, 'string');
@@ -688,6 +741,21 @@ describe('createMcpServer tool registration', () => {
     assert.ok(Array.isArray(session.events));
     assert.ok(session.cost);
     assert.equal(typeof session.startTime, 'number');
+  });
+
+  it('gsd_status accepts omitted sessionId when exactly one session is tracked', async () => {
+    const sessionId = await sm.startSession('/tmp/tool-status-infer', { cliPath: '/usr/bin/gsd' });
+    const { server } = await createMcpServer(sm);
+    const statusTool = (server as any)._registeredTools?.gsd_status;
+
+    assert.ok(statusTool, 'gsd_status should be registered');
+    assert.equal(statusTool.inputSchema.safeParse({ sessionId: undefined }).success, true);
+
+    const result = await statusTool.handler({});
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.sessionId, sessionId);
+    assert.equal(payload.projectDir, resolve('/tmp/tool-status-infer'));
+    assert.equal(payload.status, 'running');
   });
 
   it('gsd_resolve_blocker flow returns error when no blocker', async () => {

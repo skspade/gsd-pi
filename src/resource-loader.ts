@@ -352,15 +352,16 @@ function copyDirRecursive(src: string, dest: string): void {
  * them without requiring every call site to use jiti.
  *
  * Layout differences by install method:
- * - Source/monorepo: packageRoot/node_modules has everything → simple symlink
- * - Global install (npm/bun/pnpm): merge hoisted dirname(packageRoot)/node_modules with
- *   packageRoot/node_modules so package-local deps like @sinclair/typebox resolve (#3529, #3564)
+ * - Source/monorepo: packageRoot/node_modules has everything -> simple symlink
+ * - Global install (npm/bun/pnpm): merge the nearest ancestor node_modules
+ *   with packageRoot/node_modules so both hoisted deps like yaml and
+ *   package-local deps like @sinclair/typebox resolve (#3529, #3564).
  */
 function ensureNodeModulesSymlink(agentDir: string): void {
   const agentNodeModules = join(agentDir, 'node_modules')
-  const { internalNodeModules, hoistedNodeModules, isGlobalInstall } = resolveNodeModulesLayout()
+  const { internalNodeModules, hoistedNodeModules } = resolvePackageNodeModulesLayout(packageRoot)
 
-  if (!isGlobalInstall) {
+  if (!hoistedNodeModules) {
     // Source/monorepo: internal node_modules has everything
     reconcileSymlink(agentNodeModules, internalNodeModules)
     return
@@ -370,6 +371,26 @@ function ensureNodeModulesSymlink(agentDir: string): void {
   // npm often keeps runtime deps (e.g. @sinclair/typebox) package-local even when
   // @gsd/* scopes are hoisted — a hoisted-only symlink breaks extension imports.
   reconcileMergedNodeModules(agentNodeModules, hoistedNodeModules, internalNodeModules)
+}
+
+export function resolvePackageNodeModulesLayout(root: string): {
+  internalNodeModules: string
+  hoistedNodeModules: string | null
+} {
+  return {
+    internalNodeModules: join(root, 'node_modules'),
+    hoistedNodeModules: findNearestNodeModulesAncestor(root),
+  }
+}
+
+export function findNearestNodeModulesAncestor(startPath: string): string | null {
+  let current = resolve(startPath)
+  while (true) {
+    if (basename(current) === 'node_modules') return current
+    const parent = dirname(current)
+    if (parent === current) return null
+    current = parent
+  }
 }
 
 /** Check if any GSD workspace scopes exist in internal but not in hoisted node_modules */
@@ -586,6 +607,7 @@ function pruneRemovedBundledExtensions(
  * Syncs all bundled resources to agentDir (~/.gsd/agent/) on every launch.
  *
  * - extensions/ → ~/.gsd/agent/extensions/   (overwrite when version changes)
+ * - shared/     → ~/.gsd/agent/shared/       (overwrite when version changes)
  * - agents/     → ~/.gsd/agent/agents/        (overwrite when version changes)
  * - skills/     → ~/.gsd/agent/skills/        (overwrite when version changes)
  * - GSD-WORKFLOW.md → ~/.gsd/agent/GSD-WORKFLOW.md (fallback for env var miss)
@@ -631,7 +653,21 @@ export function initResources(agentDir: string, skillsDir: string = join(agentDi
     // Version matches — check content fingerprint for same-version staleness.
     const currentHash = getCurrentResourceFingerprint()
     const hasStaleExtensionFiles = hasStaleCompiledExtensionSiblings(extensionsDir, bundledExtensionsDir)
-    if (manifest.contentHash && manifest.contentHash === currentHash && !hasStaleExtensionFiles) {
+    const hasMissingSharedFiles = hasMissingBundledResourceFiles(
+      join(agentDir, 'shared'),
+      join(resourcesDir, 'shared'),
+    )
+    const hasMissingSkillFiles = hasMissingBundledResourceFiles(
+      skillsDir,
+      join(resourcesDir, 'skills'),
+    )
+    if (
+      manifest.contentHash &&
+      manifest.contentHash === currentHash &&
+      !hasStaleExtensionFiles &&
+      !hasMissingSharedFiles &&
+      !hasMissingSkillFiles
+    ) {
       return
     }
   }
@@ -639,6 +675,7 @@ export function initResources(agentDir: string, skillsDir: string = join(agentDi
   // Sync bundled resources — overwrite so updates land on next launch.
 
   syncResourceDir(bundledExtensionsDir, join(agentDir, 'extensions'))
+  syncResourceDir(join(resourcesDir, 'shared'), join(agentDir, 'shared'))
   syncResourceDir(join(resourcesDir, 'agents'), join(agentDir, 'agents'))
   syncResourceDir(join(resourcesDir, 'skills'), skillsDir)
 
@@ -666,43 +703,17 @@ function cleanupBundledSkillsFromEcosystemDir(): void {
 
   for (const entry of readdirSync(bundledSkillsDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
-    const sourcePath = join(bundledSkillsDir, entry.name)
     const targetPath = join(ecosystemDir, entry.name)
     if (!existsSync(targetPath)) continue
 
     try {
       if (lstatSync(targetPath).isSymbolicLink()) continue
-      if (directoriesHaveExactFileContents(sourcePath, targetPath)) {
-        makeTreeWritable(targetPath)
-        rmSync(targetPath, { recursive: true, force: true })
-      } else {
-        console.warn(
-          `[GSD] Leaving ambiguous skill collision in ${targetPath}; ` +
-          `the bundled copy will be used from ~/.gsd/agent/skills/${entry.name}.`,
-        )
-      }
+      makeTreeWritable(targetPath)
+      rmSync(targetPath, { recursive: true, force: true })
     } catch {
       // Non-fatal: never let cleanup of the shared ecosystem dir block startup.
     }
   }
-}
-
-function directoriesHaveExactFileContents(sourceDir: string, targetDir: string): boolean {
-  const sourceFiles = collectRelativeFiles(sourceDir)
-  const targetFiles = collectRelativeFiles(targetDir)
-  if (sourceFiles.size !== targetFiles.size) return false
-
-  for (const relPath of sourceFiles) {
-    if (!targetFiles.has(relPath)) return false
-    const sourcePath = join(sourceDir, relPath)
-    const targetPath = join(targetDir, relPath)
-    try {
-      if (!readFileSync(sourcePath).equals(readFileSync(targetPath))) return false
-    } catch {
-      return false
-    }
-  }
-  return true
 }
 
 export function hasStaleCompiledExtensionSiblings(extensionsDir: string, sourceDir: string = bundledExtensionsDir): boolean {
@@ -721,6 +732,17 @@ export function hasStaleCompiledExtensionSiblings(extensionsDir: string, sourceD
     if (sourceFiles.has(bundledSibling)) return true
   }
 
+  return false
+}
+
+export function hasMissingBundledResourceFiles(destDir: string, sourceDir: string): boolean {
+  const sourceFiles = collectRelativeFiles(sourceDir)
+  if (sourceFiles.size === 0) return false
+
+  const installedFiles = collectRelativeFiles(destDir)
+  for (const relPath of sourceFiles) {
+    if (!installedFiles.has(relPath)) return true
+  }
   return false
 }
 

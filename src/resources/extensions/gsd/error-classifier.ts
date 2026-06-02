@@ -47,16 +47,18 @@ export function resetRetryState(state: RetryState): void {
 const PERMANENT_RE = /auth|unauthorized|forbidden|invalid.*key|invalid.*api|billing|quota exceeded|account/i;
 // Include provider-specific quota-window phrasing like:
 // - "You've hit your limit"
+// - "You've reached your limit"
 // - "usage limit" / "quota reached"
 // - "out of extra usage"
-const RATE_LIMIT_RE = /rate.?limit|too many requests|429|hit your limit|usage limit|out of extra usage|quota (?:reached|hit)|limit.*resets?/i;
+const RATE_LIMIT_RE = /rate.?limit|too many requests|429|(?:hit|reached) your (?:\w+ )?limit|(?:usage|session|weekly|daily|monthly|quota) limit|out of extra usage|quota (?:reached|hit)|limit.*resets?/i;
 // OpenRouter affordability-style quota errors should be treated as transient
 // so core retry logic can lower maxTokens and continue in-session.
 const AFFORDABILITY_RE = /requires more credits|can only afford|insufficient credits|not enough credits|fewer max_tokens/i;
-// "Stream idle timeout" and "partial response received" are emitted by the SDK/harness
-// for mid-stream disconnects. Both indicate a transient network-level interruption.
+// "Stream idle timeout", "partial response received", and WebSocket errors
+// are emitted by SDK/harness transports for mid-stream disconnects.
+// These indicate transient network-level interruptions.
 // See: https://github.com/open-gsd/gsd-pi/issues/4558
-const NETWORK_RE = /network|ECONNRESET|ETIMEDOUT|ECONNREFUSED|socket hang up|fetch failed|connection.*reset|dns|unexpected eof|stream idle timeout|partial response received/i;
+const NETWORK_RE = /network|ECONNRESET|ETIMEDOUT|ECONNREFUSED|socket hang up|web ?socket|fetch failed|connection.*reset|dns|unexpected eof|stream idle timeout|partial response received/i;
 // Context overflow errors (context window/length exceeded) should be treated as server-class
 // transient errors so auto-mode can retry with reduced budget or fall back to a larger-context model.
 // See: https://github.com/open-gsd/gsd-pi/issues/4528

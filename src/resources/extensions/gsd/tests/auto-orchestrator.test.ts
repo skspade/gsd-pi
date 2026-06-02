@@ -15,6 +15,7 @@ import { resolveDispatch, type DispatchContext } from "../auto-dispatch.js";
 import { RuleRegistry, setRegistry, resetRegistry } from "../rule-registry.js";
 import type { UnifiedRule } from "../rule-types.js";
 import { supportsStructuredQuestions } from "../workflow-mcp.js";
+import { closeDatabase, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.js";
 
 function assertBlockedResult(
   result: Awaited<ReturnType<ReturnType<typeof createAutoOrchestrator>["advance"]>>,
@@ -612,6 +613,27 @@ test("retryActiveUnit clears in-flight idempotency without marking the unit fina
   assert.ok(calls.includes("journal:unit-retry"));
   const prepareCalls = calls.filter((c) => c === "worktree.prepare").length;
   assert.equal(prepareCalls, 2, "retry should intentionally redispatch the same unit");
+});
+
+test("retryActiveUnit clears finalized same-unit guard for post-hook retries", async () => {
+  const { deps, calls } = makeDeps();
+  const orchestrator = createAutoOrchestrator(deps);
+
+  const first = await orchestrator.advance();
+  assert.equal(first.kind, "advanced");
+  if (first.kind !== "advanced") throw new Error("expected first advance");
+
+  await orchestrator.completeActiveUnit(first.unit);
+  await orchestrator.retryActiveUnit(first.unit);
+  const second = await orchestrator.advance();
+
+  assert.equal(second.kind, "advanced");
+  if (second.kind !== "advanced") throw new Error("expected retry advance");
+  assert.deepEqual(second.unit, first.unit);
+  assert.ok(calls.includes("journal:unit-finalized"));
+  assert.ok(calls.includes("journal:unit-retry"));
+  const prepareCalls = calls.filter((c) => c === "worktree.prepare").length;
+  assert.equal(prepareCalls, 2, "post-hook retry should redispatch the finalized unit");
 });
 
 test("resume() re-enters running phase", async () => {
@@ -1246,6 +1268,92 @@ test("wired DispatchAdapter forwards constructor session when advance input omit
   }
 });
 
+test("wired DispatchAdapter adopts next active milestone after the session milestone is closed", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-orchestrator-milestone-adopt-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const stateSnapshot: GSDState = {
+    ...makeState(),
+    activeMilestone: { id: "M002", title: "Next" },
+    registry: [
+      { id: "M001", title: "First", status: "complete" },
+      { id: "M002", title: "Next", status: "active" },
+    ],
+  };
+  const captured: DispatchContext[] = [];
+  const captureRule: UnifiedRule = {
+    name: "test-milestone-adoption",
+    when: "dispatch",
+    evaluation: "first-match",
+    where: async (ctx: DispatchContext) => {
+      captured.push(ctx);
+      return {
+        action: "dispatch" as const,
+        unitType: "execute-task",
+        unitId: "M002/S01/T01",
+        prompt: "adopted-milestone-fixture",
+      };
+    },
+    then: (r: unknown) => r,
+  };
+  setRegistry(new RuleRegistry([captureRule]));
+
+  try {
+    const ctx = { model: {}, modelRegistry: { getAll: () => [] } } as any;
+    const pi = { getActiveTools: () => [] } as any;
+    const session = {
+      basePath: base,
+      originalBasePath: base,
+      currentMilestoneId: "M001",
+    } as any;
+    const adapter = createWiredDispatchAdapter(ctx, pi, base, session);
+
+    const result = await adapter.decideNextUnit({ stateSnapshot });
+
+    assert.ok(result);
+    if (!("unitType" in result)) assert.fail(`expected dispatch decision, got ${JSON.stringify(result)}`);
+    assert.equal(result.unitId, "M002/S01/T01");
+    assert.equal(session.currentMilestoneId, "M002");
+    assert.equal(captured[0]?.session?.currentMilestoneId, "M002");
+  } finally {
+    resetRegistry();
+  }
+});
+
+test("wired DispatchAdapter keeps blocking stale milestone worktree scope", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-orchestrator-worktree-block-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const stateSnapshot: GSDState = {
+    ...makeState(),
+    activeMilestone: { id: "M002", title: "Next" },
+    registry: [
+      { id: "M001", title: "First", status: "complete" },
+      { id: "M002", title: "Next", status: "active" },
+    ],
+  };
+  const worktreePath = join(base, ".gsd", "worktrees", "M001");
+  mkdirSync(worktreePath, { recursive: true });
+  const ctx = { model: {}, modelRegistry: { getAll: () => [] } } as any;
+  const pi = { getActiveTools: () => [] } as any;
+  const session = {
+    basePath: worktreePath,
+    originalBasePath: base,
+    currentMilestoneId: "M001",
+  } as any;
+  const adapter = createWiredDispatchAdapter(ctx, pi, base, session);
+
+  const result = await adapter.decideNextUnit({ stateSnapshot });
+
+  assert.deepEqual(result, {
+    kind: "blocked",
+    reason:
+      'Dispatch milestone mismatch: context mid "M002" does not match session.currentMilestoneId "M001". The active worktree/session and derived project state disagree; recover, park, or discard the stranded milestone before continuing.',
+    action: "pause",
+  });
+  assert.equal(session.currentMilestoneId, "M001");
+});
+
 test("wired DispatchAdapter replays pending verification retry dispatch", async () => {
   const stateSnapshot = makeState();
   const ctx = { model: {}, modelRegistry: { getAll: () => [] } } as any;
@@ -1275,6 +1383,59 @@ test("wired DispatchAdapter replays pending verification retry dispatch", async 
   assert.equal(session.pendingVerificationRetryDispatch, null);
   assert.equal(session.pendingOrchestrationDispatch?.prompt, "repair slice closeout");
   assert.equal(session.pendingOrchestrationDispatch?.state, stateSnapshot);
+});
+
+test("wired DispatchAdapter clears verification retry state when skipping an already closed retry dispatch", async () => {
+  const stateSnapshot = makeState();
+  const base = mkdtempSync(join(tmpdir(), "gsd-orchestrator-closed-retry-"));
+
+  try {
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "Slice", status: "active" });
+    insertTask({ milestoneId: "M001", sliceId: "S01", id: "T01", title: "Task", status: "complete" });
+
+    const retryRule: UnifiedRule = {
+      name: "test-closed-verification-retry",
+      when: "dispatch",
+      evaluation: "first-match",
+      where: async () => ({
+        action: "dispatch" as const,
+        unitType: "execute-task",
+        unitId: "M001/S01/T01",
+        prompt: "retry closed task",
+      }),
+      then: (r: unknown) => r,
+    };
+    setRegistry(new RuleRegistry([retryRule]));
+
+    const ctx = { model: {}, modelRegistry: { getAll: () => [] } } as any;
+    const pi = { getActiveTools: () => [] } as any;
+    const session = {
+      basePath: base,
+      pendingOrchestrationDispatch: { stale: true },
+      pendingVerificationRetry: {
+        unitId: "M001/S01/T01",
+        failureContext: "artifact missing",
+        attempt: 1,
+      },
+    } as any;
+    const adapter = createWiredDispatchAdapter(ctx, pi, base, session);
+
+    const result = await adapter.decideNextUnit({ stateSnapshot });
+
+    assert.deepEqual(result, {
+      kind: "skipped",
+      reason: "execute-task M001/S01/T01 is already complete",
+    });
+    assert.equal(session.pendingVerificationRetry, null);
+    assert.equal(session.pendingOrchestrationDispatch, null);
+  } finally {
+    resetRegistry();
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test("wired DispatchAdapter preserves stop reason as a blocked decision", async () => {

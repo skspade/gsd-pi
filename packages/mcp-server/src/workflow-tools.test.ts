@@ -3,11 +3,12 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
 
 import { symlinkSync, realpathSync } from "node:fs";
 
@@ -15,6 +16,7 @@ import {
   _getAdapter,
   closeDatabase,
   getSliceTasks,
+  insertDecision,
   insertMilestone,
   insertSlice,
   openDatabase,
@@ -22,11 +24,14 @@ import {
 } from "../../../src/resources/extensions/gsd/gsd-db.ts";
 import { buildReassessRoadmapPrompt } from "../../../src/resources/extensions/gsd/auto-prompts.ts";
 import { invalidateAllCaches } from "../../../src/resources/extensions/gsd/cache.ts";
+import { resolveToolPresentationPlan } from "../../../src/resources/extensions/gsd/tool-presentation-plan.ts";
 import {
   _buildBridgeImportCandidates,
   _buildImportCandidates,
   registerWorkflowTools,
   WORKFLOW_TOOL_NAMES,
+  CANONICAL_WORKFLOW_TOOL_NAMES,
+  WORKFLOW_TOOL_ALIAS_NAMES,
   validateProjectDir,
 } from "./workflow-tools.ts";
 
@@ -149,6 +154,19 @@ function assertToolError(result: unknown, expected: RegExp | string): string {
   return text;
 }
 
+function runUatMcpPresentation() {
+  const plan = resolveToolPresentationPlan({
+    phase: "run-uat",
+    surface: "mcp",
+    workflowMcpServerName: "gsd-workflow",
+  });
+  return {
+    surface: plan.surface,
+    presentedTools: plan.presentedToolNames,
+    blockedTools: plan.blockedToolNames,
+  };
+}
+
 function cacheBustedWorkflowToolsImport(tag: string): string {
   const extension = import.meta.url.includes("/dist-test/") ? "js" : "ts";
   return `./workflow-tools.${extension}?${tag}=${randomUUID()}`;
@@ -173,6 +191,22 @@ describe("workflow MCP tools", () => {
     assert.deepEqual(server.tools.map((t) => t.name), [...WORKFLOW_TOOL_NAMES]);
   });
 
+  it("omits backwards-compatibility aliases when advertiseAliases is false", () => {
+    const server = makeMockServer();
+    registerWorkflowTools(server as any, { advertiseAliases: false });
+
+    const toolNames = server.tools.map((t) => t.name);
+    assert.equal(toolNames.length, CANONICAL_WORKFLOW_TOOL_NAMES.length);
+    assert.deepEqual(toolNames, [...CANONICAL_WORKFLOW_TOOL_NAMES]);
+    for (const alias of WORKFLOW_TOOL_ALIAS_NAMES) {
+      assert.ok(!toolNames.includes(alias), `alias ${alias} should not be advertised`);
+    }
+    // Every canonical tool is still present.
+    for (const canonical of CANONICAL_WORKFLOW_TOOL_NAMES) {
+      assert.ok(toolNames.includes(canonical), `canonical ${canonical} must be registered`);
+    }
+  });
+
   it("registers task reopen in the workflow MCP tool surface", () => {
     const server = makeMockServer();
     registerWorkflowTools(server as any);
@@ -187,6 +221,45 @@ describe("workflow MCP tools", () => {
     assert.ok("sliceId" in taskReopen.params);
     assert.ok("taskId" in taskReopen.params);
     assert.ok("reason" in taskReopen.params);
+  });
+
+  it("registers gsd_checkpoint_db and flushes the open WAL", async () => {
+    const base = makeTmpBase();
+    try {
+      const server = makeMockServer();
+      registerWorkflowTools(server as any);
+      const tool = server.tools.find((t) => t.name === "gsd_checkpoint_db");
+      assert.ok(tool, "gsd_checkpoint_db must be registered");
+      assert.ok("projectDir" in tool.params);
+
+      const dbPath = join(base, ".gsd", "gsd.db");
+      openDatabase(dbPath);
+      insertDecision({
+        id: "D001",
+        when_context: "test",
+        scope: "global",
+        decision: "Expose checkpoint tool over MCP",
+        choice: "register gsd_checkpoint_db",
+        rationale: "MCP clients need to flush WAL before staging gsd.db",
+        revisable: "yes",
+        made_by: "agent",
+        superseded_by: null,
+      });
+
+      const walPath = `${dbPath}-wal`;
+      assert.ok(existsSync(walPath), "WAL file should exist after a write");
+      assert.ok(statSync(walPath).size > 0, "WAL file should be non-empty after a write");
+
+      const result = await tool.handler({ projectDir: base });
+      const record = result as { content?: Array<{ text?: string }>; structuredContent?: Record<string, unknown> };
+      assert.equal(record.content?.[0]?.text, "WAL checkpoint complete. gsd.db is now up to date and safe to stage with git add.");
+      assert.deepEqual(record.structuredContent, { operation: "checkpoint_db", status: "ok" });
+
+      const walSizeAfter = existsSync(walPath) ? statSync(walPath).size : 0;
+      assert.equal(walSizeAfter, 0, "WAL file should be truncated to 0 after MCP checkpoint");
+    } finally {
+      cleanup(base);
+    }
   });
 
   it("prefers source TypeScript for generic local module imports", () => {
@@ -270,6 +343,200 @@ describe("workflow MCP tools", () => {
         new RegExp(base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
         "script should run relative to the requested projectDir",
       );
+    } finally {
+      cleanup(base);
+    }
+  });
+
+  it("gsd_exec accepts command alias without an explicit runtime", async () => {
+    const base = makeTmpBase();
+    try {
+      const server = makeMockServer();
+      registerWorkflowTools(server as any);
+      const tool = server.tools.find((t) => t.name === "gsd_exec");
+      assert.ok(tool, "exec tool should be registered");
+
+      const result = await tool!.handler({
+        projectDir: base,
+        command: "echo mcp-command-alias-defaults-to-bash",
+      });
+
+      const record = result as any;
+      assert.equal(record.isError, false);
+      assert.equal(record.structuredContent.runtime, "bash");
+      assert.match(record.content[0].text as string, /mcp-command-alias-defaults-to-bash/);
+    } finally {
+      cleanup(base);
+    }
+  });
+
+  it("gsd_uat_exec records typed UAT metadata and blocks unsafe UAT commands", async () => {
+    const base = makeTmpBase();
+    const originalCwd = process.cwd();
+    try {
+      seedContextModeFixture(base);
+      const server = makeMockServer();
+      registerWorkflowTools(server as any);
+      const tool = server.tools.find((t) => t.name === "gsd_uat_exec");
+      assert.ok(tool, "UAT exec tool should be registered");
+
+      const result = await tool!.handler({
+        projectDir: base,
+        milestoneId: "M001",
+        sliceId: "S01",
+        checkId: "UAT-01",
+        intent: "uat-runtime-check",
+        command: "echo UAT_OK",
+        expected: "UAT_OK appears in stdout",
+      });
+
+      const record = result as any;
+      assert.equal(record.isError, false);
+      assert.equal(record.structuredContent.operation, "gsd_uat_exec");
+      assert.equal(record.structuredContent.milestoneId, "M001");
+      assert.equal(record.structuredContent.sliceId, "S01");
+      assert.equal(record.structuredContent.checkId, "UAT-01");
+      assert.equal(record.structuredContent.intent, "uat-runtime-check");
+      assert.equal(typeof record.structuredContent.id, "string");
+      assert.ok(existsSync(record.structuredContent.meta_path), "meta should be persisted");
+      const meta = JSON.parse(readFileSync(record.structuredContent.meta_path, "utf-8")) as {
+        metadata?: Record<string, unknown>;
+      };
+      assert.deepEqual(meta.metadata, {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S01",
+        checkId: "UAT-01",
+        intent: "uat-runtime-check",
+        expected: "UAT_OK appears in stdout",
+      });
+      assert.equal(process.cwd(), originalCwd, "gsd_uat_exec must not mutate process.cwd");
+
+      const blocked = await tool!.handler({
+        projectDir: base,
+        milestoneId: "M001",
+        sliceId: "S01",
+        checkId: "UAT-02",
+        intent: "uat-runtime-check",
+        command: "npm install left-pad",
+      });
+      assertToolError(blocked, /blocked command/);
+      assert.equal((blocked as any).structuredContent.operation, "gsd_uat_exec");
+      assert.equal((blocked as any).structuredContent.error, "uat_exec_policy_block");
+    } finally {
+      cleanup(base);
+    }
+  });
+
+  it("gsd_uat_result_save validates evidence and persists aggregate UAT gate state", async () => {
+    const base = makeTmpBase();
+    try {
+      seedContextModeFixture(base);
+      const server = makeMockServer();
+      registerWorkflowTools(server as any);
+      const execTool = server.tools.find((t) => t.name === "gsd_uat_exec");
+      const saveTool = server.tools.find((t) => t.name === "gsd_uat_result_save");
+      assert.ok(execTool, "UAT exec tool should be registered");
+      assert.ok(saveTool, "UAT result tool should be registered");
+
+      const execResult = await execTool!.handler({
+        projectDir: base,
+        milestoneId: "M001",
+        sliceId: "S01",
+        checkId: "UAT-01",
+        intent: "uat-runtime-check",
+        command: "echo UAT_RESULT_OK",
+      });
+      const evidenceId = (execResult as any).structuredContent.id;
+      assert.equal(typeof evidenceId, "string");
+
+      const invalidPresentation = runUatMcpPresentation();
+      invalidPresentation.presentedTools = invalidPresentation.presentedTools.filter(
+        (toolName) => !toolName.endsWith("__gsd_journal_query"),
+      );
+      const missingPresentedTool = await saveTool!.handler({
+        projectDir: base,
+        milestoneId: "M001",
+        sliceId: "S01",
+        uatType: "runtime-executable",
+        verdict: "PASS",
+        checks: [{
+          id: "UAT-01",
+          description: "Runtime check has evidence",
+          mode: "runtime",
+          result: "PASS",
+          evidence: [{ kind: "gsd_uat_exec", ref: evidenceId }],
+        }],
+        presentation: invalidPresentation,
+      });
+      assertToolError(missingPresentedTool, /missing required UAT tool "gsd_journal_query"/);
+
+      const missingEvidence = await saveTool!.handler({
+        projectDir: base,
+        milestoneId: "M001",
+        sliceId: "S01",
+        uatType: "runtime-executable",
+        verdict: "PASS",
+        checks: [{
+          id: "UAT-01",
+          description: "Runtime check has evidence",
+          mode: "runtime",
+          result: "PASS",
+          evidence: [],
+        }],
+        presentation: runUatMcpPresentation(),
+      });
+      assertToolError(missingEvidence, /objective evidence/);
+
+      const result = await saveTool!.handler({
+        projectDir: base,
+        milestoneId: "M001",
+        sliceId: "S01",
+        uatType: "runtime-executable",
+        verdict: "PASS",
+        checks: [{
+          id: "UAT-01",
+          description: "Runtime check has evidence",
+          mode: "runtime",
+          result: "PASS",
+          evidence: [{ kind: "gsd_uat_exec", ref: evidenceId }],
+          notes: "Command produced the expected marker.",
+        }],
+        presentation: runUatMcpPresentation(),
+        notes: "UAT passed with objective runtime evidence.",
+      });
+
+      const record = result as any;
+      assert.equal(record.isError, undefined);
+      assert.equal(record.structuredContent.operation, "save_uat_result");
+      assert.equal(record.structuredContent.verdict, "PASS");
+      assert.equal(record.structuredContent.gateVerdict, "pass");
+      assert.equal(record.structuredContent.attempt, 1);
+      assert.equal(record.structuredContent.recommendedNextUnit, null);
+      assert.ok(
+        existsSync(join(base, ".gsd", record.structuredContent.attemptPath)),
+        "attempt JSON should be persisted",
+      );
+      assert.ok(
+        existsSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-ASSESSMENT.md")),
+        "ASSESSMENT artifact should be persisted",
+      );
+
+      const gateRow = _getAdapter()!.prepare(
+        "SELECT status, verdict, rationale FROM quality_gates WHERE milestone_id = ? AND slice_id = ? AND gate_id = ? AND task_id = ''",
+      ).get("M001", "S01", "UAT") as Record<string, unknown> | undefined;
+      assert.ok(gateRow, "aggregate UAT quality gate row should exist");
+      assert.equal(gateRow["status"], "complete");
+      assert.equal(gateRow["verdict"], "pass");
+
+      const gateRun = _getAdapter()!.prepare(
+        "SELECT gate_type, unit_type, outcome, failure_class FROM gate_runs WHERE milestone_id = ? AND slice_id = ? AND gate_id = ?",
+      ).get("M001", "S01", "UAT") as Record<string, unknown> | undefined;
+      assert.ok(gateRun, "UAT gate run should be recorded");
+      assert.equal(gateRun["gate_type"], "uat");
+      assert.equal(gateRun["unit_type"], "run-uat");
+      assert.equal(gateRun["outcome"], "pass");
+      assert.equal(gateRun["failure_class"], "none");
     } finally {
       cleanup(base);
     }
@@ -918,6 +1185,44 @@ describe("workflow MCP tools", () => {
     }
   });
 
+  it("gsd_task_complete accepts step-mode evidence when verification summary is omitted", async () => {
+    const base = makeTmpBase();
+    try {
+      mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S01"), { recursive: true });
+      writeFileSync(
+        join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md"),
+        "# S01\n\n- [ ] **T01: Demo** `est:5m`\n",
+      );
+
+      const server = makeMockServer();
+      registerWorkflowTools(server as any);
+      const taskTool = server.tools.find((t) => t.name === "gsd_task_complete");
+      assert.ok(taskTool, "task tool should be registered");
+
+      const taskResult = await taskTool!.handler({
+        projectDir: base,
+        taskId: "T01",
+        sliceId: "S01",
+        milestoneId: "M001",
+        oneLiner: "Completed task",
+        narrative: "Did the work",
+        verificationEvidence: [
+          { command: "npm test", exitCode: 0, verdict: "pass", durationMs: 1234 },
+        ],
+      });
+
+      assert.match((taskResult as any).content[0].text as string, /Completed task T01/);
+      const db = _getAdapter();
+      assert.ok(db, "DB should be open after tool completion");
+      const row = db!.prepare(
+        "SELECT verification_result FROM tasks WHERE milestone_id = ? AND slice_id = ? AND id = ?",
+      ).get("M001", "S01", "T01") as Record<string, unknown> | undefined;
+      assert.match(String(row?.verification_result), /`npm test` exited 0 \(pass\)/);
+    } finally {
+      cleanup(base);
+    }
+  });
+
   it("#4477 gsd_task_complete forwards every schema field to the executor (regression for destructure-rebuild bug class)", async () => {
     // Locks in the class-fix from PR #4477 review: handleTaskComplete previously
     // destructured args into a hand-listed set of fields and rebuilt the call
@@ -952,6 +1257,7 @@ export const executeValidateMilestone = noop;
 export const executeReassessRoadmap = noop;
 export const executeSaveGateResult = noop;
 export const executeSummarySave = noop;
+export const executeUatResultSave = noop;
 export const executeTaskReopen = noop;
 export const executeSliceReopen = noop;
 export const executeMilestoneReopen = noop;
@@ -2103,6 +2409,28 @@ export const executeTaskComplete = async (params, projectDir) => {
       assert.equal(gateRows.length, 1);
       assert.equal(gateRows[0]["status"], "complete");
       assert.equal(gateRows[0]["verdict"], "pass");
+
+      const gateInputSchema = z.object(gateTool!.params as any);
+      const inferredGateArgs = gateInputSchema.parse({
+        projectDir: base,
+        gateId: "Q4",
+        verdict: "omitted",
+        rationale: "No existing requirements are touched by this slice.",
+        findings: "",
+      });
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(inferredGateArgs, "milestoneId"),
+        false,
+        "MCP input schema must allow gate result calls before milestoneId is inferred",
+      );
+      const inferredGateResult = await gateTool!.handler(inferredGateArgs);
+      assert.match((inferredGateResult as any).content[0].text as string, /Gate Q4 result saved/);
+      const inferredGateRows = _getAdapter()!.prepare(
+        "SELECT status, verdict, rationale FROM quality_gates WHERE milestone_id = ? AND slice_id = ? AND gate_id = ?",
+      ).all("M006", "S06", "Q4") as Array<Record<string, unknown>>;
+      assert.equal(inferredGateRows.length, 1);
+      assert.equal(inferredGateRows[0]["status"], "complete");
+      assert.equal(inferredGateRows[0]["verdict"], "omitted");
 
       await taskTool!.handler({
         projectDir: base,

@@ -33,8 +33,12 @@ import { resolveWorktreeProjectRoot } from "../worktree-root.js";
 import { extractSubagentAgentClasses } from "./subagent-input.js";
 import { approvalGateIdForUnit, isExplicitApprovalResponse, shouldPauseForUserApprovalQuestion } from "../user-input-boundary.js";
 import { resolveSkillManifest } from "../skill-manifest.js";
+import { applyUnitSkillVisibility, unitHasSkillManifest } from "../skill-scope.js";
 import { getGuidedUnitContext } from "../guided-unit-context.js";
 import { registerPlanMilestoneSchemaRecovery } from "./plan-milestone-schema-recovery.js";
+import { AUTO_UNIT_SCOPED_TOOLS, RUN_UAT_BROWSER_TOOL_NAMES, isWorkflowAliasTool } from "../auto-unit-tool-scope.js";
+import { filterToolsForProvider } from "../model-router.js";
+import { RUN_UAT_WORKFLOW_TOOL_NAMES } from "../tool-presentation-plan.js";
 
 let approvalQuestionAbortInFlight = false;
 
@@ -121,6 +125,7 @@ export const MINIMAL_GSD_TOOL_NAMES = [
   "gsd_resume",
   "gsd_milestone_status",
   "gsd_checkpoint_db",
+  "gsd_plan_milestone",
   "memory_query",
   "capture_thought",
 ] as const;
@@ -146,58 +151,23 @@ function withPreservedShimTools(toolNames: readonly string[]): string[] {
   return [...new Set([...toolNames, ...ALWAYS_PRESERVED_SHIM_TOOL_NAMES])];
 }
 
-const RUN_UAT_BROWSER_TOOL_NAMES = [
-  "browser_navigate",
-  "browser_click",
-  "browser_type",
-  "browser_fill_form",
-  "browser_click_ref",
-  "browser_fill_ref",
-  "browser_wait_for",
-  "browser_assert",
-  "browser_verify",
-  "browser_screenshot",
-  "browser_snapshot_refs",
-  "browser_find",
-  "browser_get_console_logs",
-  "browser_get_network_logs",
-  "browser_evaluate",
-  "browser_reload",
-  "browser_batch",
-  "browser_act",
-] as const;
+/** True for the browser automation tools (browser_navigate, browser_click, ...). */
+function isBrowserTool(toolName: string): boolean {
+  return canonicalToolName(toolName).startsWith("browser_");
+}
 
-const AUTO_UNIT_SCOPED_TOOLS: Record<string, readonly string[]> = {
-  "research-milestone": ["gsd_summary_save", "gsd_decision_save"],
-  "plan-milestone": ["gsd_plan_milestone", "gsd_decision_save", "gsd_requirement_update"],
-  "discuss-milestone": [
-    "gsd_summary_save",
-    "gsd_decision_save",
-    "gsd_requirement_save",
-    "gsd_requirement_update",
-    "gsd_plan_milestone",
-    "gsd_milestone_generate_id",
-  ],
-  "validate-milestone": ["gsd_validate_milestone", "gsd_reassess_roadmap", "subagent"],
-  "complete-milestone": ["gsd_complete_milestone", "subagent"],
-  "research-slice": ["gsd_summary_save", "gsd_decision_save"],
-  "plan-slice": ["gsd_plan_slice", "gsd_plan_task", "gsd_decision_save"],
-  "refine-slice": ["gsd_plan_slice", "gsd_plan_task", "gsd_decision_save"],
-  "replan-slice": ["gsd_replan_slice", "gsd_plan_task", "gsd_decision_save"],
-  "complete-slice": ["gsd_slice_complete", "gsd_task_reopen", "gsd_replan_slice", "gsd_decision_save", "gsd_requirement_update", "subagent"],
-  "reassess-roadmap": ["gsd_reassess_roadmap"],
-  "execute-task": ["gsd_task_complete", "gsd_decision_save"],
-  "execute-task-simple": ["gsd_task_complete", "gsd_decision_save"],
-  "reactive-execute": ["gsd_task_complete", "gsd_decision_save"],
-  "run-uat": ["gsd_summary_save", ...RUN_UAT_BROWSER_TOOL_NAMES],
-  "gate-evaluate": ["gsd_save_gate_result"],
-  "rewrite-docs": ["gsd_summary_save", "gsd_decision_save"],
-  "workflow-preferences": ["gsd_summary_save"],
-  "discuss-project": ["gsd_summary_save", "gsd_decision_save", "gsd_requirement_save"],
-  "discuss-requirements": ["gsd_requirement_save", "gsd_summary_save"],
-  "research-decision": ["gsd_summary_save"],
-  "research-project": ["gsd_summary_save", "gsd_decision_save"],
-};
+/**
+ * True when any message in the request is driven by a GSD workflow command
+ * (customType starting "gsd-"). Plain interactive chat has none, and is scoped
+ * to the minimal GSD tool surface by default.
+ */
+export function requestHasGsdCustomType(
+  requestCustomMessages: readonly { customType?: string }[] | undefined,
+): boolean {
+  return (requestCustomMessages ?? []).some(
+    (message) => typeof message.customType === "string" && message.customType.startsWith("gsd-"),
+  );
+}
 
 const WORKFLOW_GSD_TOOL_NAMES = [
   ...MINIMAL_GSD_TOOL_NAMES,
@@ -213,7 +183,7 @@ function isGsdManagedTool(name: string): boolean {
  *
  * MCP-scoped names follow `mcp__<namespace>__<toolname>`.
  * Example: if `requestedToolNames` contains `gsd_exec` and `activeToolNames` contains
- * `mcp__gsd-workflow__gsd_exec`, the MCP-scoped active name is included in the result.
+ * `mcp__custom-workflow__gsd_exec`, the MCP-scoped active name is included in the result.
  *
  * Returns deduplicated active tool names that satisfy the requested base names.
  */
@@ -225,16 +195,24 @@ function resolveScopedToolNames(
   const resolved = new Set<string>();
 
   for (const requested of requestedToolNames) {
-    if (exact.has(requested)) resolved.add(requested);
+    const scopedMatches: string[] = [];
 
     for (const activeName of activeToolNames) {
       if (!activeName.startsWith("mcp__")) continue;
       const toolSeparator = activeName.indexOf("__", "mcp__".length);
       if (toolSeparator < 0) continue;
       if (activeName.slice(toolSeparator + 2) === requested) {
-        resolved.add(activeName);
+        scopedMatches.push(activeName);
       }
     }
+
+    if (requested.startsWith("browser_") && scopedMatches.length > 0) {
+      for (const match of scopedMatches) resolved.add(match);
+      continue;
+    }
+
+    if (exact.has(requested)) resolved.add(requested);
+    for (const match of scopedMatches) resolved.add(match);
   }
 
   return [...resolved];
@@ -251,6 +229,9 @@ export function buildMinimalAutoGsdToolSet(
   unitType: string | undefined,
   registeredToolNames: readonly string[] = activeToolNames,
 ): string[] {
+  if (unitType === "run-uat") {
+    return buildRunUatGsdToolSet(activeToolNames, registeredToolNames);
+  }
   const unitTools = unitType ? AUTO_UNIT_SCOPED_TOOLS[unitType] ?? [] : [];
   const autoBaseTools = new Set<string>(MINIMAL_AUTO_BASE_TOOL_NAMES);
   const availableBaseTools = registeredToolNames.filter((name) => autoBaseTools.has(name));
@@ -263,6 +244,17 @@ export function buildMinimalAutoGsdToolSet(
     [...MINIMAL_GSD_TOOL_NAMES, ...unitTools],
   );
   return withPreservedShimTools([...new Set([...preserved, ...scoped])]);
+}
+
+export function buildRunUatGsdToolSet(
+  activeToolNames: readonly string[],
+  registeredToolNames: readonly string[] = activeToolNames,
+): string[] {
+  const scoped = resolveScopedToolNames(
+    [...activeToolNames, ...registeredToolNames],
+    [...RUN_UAT_WORKFLOW_TOOL_NAMES, "subagent", ...RUN_UAT_BROWSER_TOOL_NAMES],
+  );
+  return [...new Set(scoped)];
 }
 
 export function buildMinimalGsdWorkflowToolSet(
@@ -313,6 +305,16 @@ function isGeneralGsdToolScopingRequested(): boolean {
   return process.env.PI_GSD_MINIMAL_TOOLS === "1";
 }
 
+/**
+ * Whether the browser automation surface (~7K tokens) should be
+ * advertised in interactive sessions. Off by default — browser tools stay
+ * registered/callable (so auto run-uat, which scopes them in explicitly, is
+ * unaffected) but are dropped from the model-facing surface until opted in.
+ */
+function isBrowserToolSurfaceRequested(): boolean {
+  return process.env.PI_GSD_BROWSER_TOOLS === "1";
+}
+
 export interface ScopedGsdWorkflowState {
   tools: string[] | null;
   visibleSkills: string[] | undefined;
@@ -357,8 +359,7 @@ export function scopeGsdWorkflowToolsForDispatch(
     ? buildMinimalAutoGsdToolSet(current, unitType, registeredToolNames)
     : buildMinimalGsdWorkflowToolSet(current, registeredToolNames);
   const toolsChanged = !(scoped.length === current.length && scoped.every((name, index) => name === current[index]));
-  const skillManifest = resolveSkillManifest(unitType);
-  const canScopeSkills = skillManifest !== null && pi.getVisibleSkills && pi.setVisibleSkills;
+  const canScopeSkills = unitHasSkillManifest(unitType) && pi.getVisibleSkills && pi.setVisibleSkills;
   if (!toolsChanged && !canScopeSkills) {
     return null;
   }
@@ -366,8 +367,8 @@ export function scopeGsdWorkflowToolsForDispatch(
     pi.setActiveTools(scoped);
   }
   const visibleSkills = canScopeSkills ? pi.getVisibleSkills!() : undefined;
-  if (canScopeSkills) {
-    pi.setVisibleSkills!(skillManifest);
+  if (canScopeSkills && pi.setVisibleSkills) {
+    applyUnitSkillVisibility({ setVisibleSkills: pi.setVisibleSkills }, unitType);
   }
   return {
     tools: toolsChanged ? current : null,
@@ -507,6 +508,21 @@ function initSessionNotifications(ctx: ExtensionContext): void {
   initNotificationWidget(ctx);
 }
 
+async function prepareWorkflowMcpForHookContext(
+  ctx: ExtensionContext,
+  basePath: string,
+): Promise<void> {
+  // Skip MCP auto-prep when running inside an auto-worktree. The worktree
+  // already has .mcp.json from createAutoWorktree, and re-running the writer
+  // post-chdir rewrites the file mid-run (non-idempotent due to cwd-relative
+  // CLI path resolution), dirtying the tree and breaking the milestone merge.
+  const { isInAutoWorktree } = await import("../auto-worktree.js");
+  if (isInAutoWorktree(basePath)) return;
+
+  const { prepareWorkflowMcpForProject } = await import("../workflow-mcp-auto-prep.js");
+  prepareWorkflowMcpForProject(ctx, basePath);
+}
+
 export function registerHooks(
   pi: ExtensionAPI,
   ecosystemHandlers: GSDEcosystemBeforeAgentStartHandler[],
@@ -532,12 +548,7 @@ export function registerHooks(
     await syncServiceTierStatus(ctx);
     await applyDisabledModelProviderPolicy(ctx);
     await applyCompactionThresholdOverride(ctx);
-    // Skip MCP auto-prep when running inside an auto-worktree (see session_switch below).
-    const { isInAutoWorktree } = await import("../auto-worktree.js");
-    if (!isInAutoWorktree(basePath)) {
-      const { prepareWorkflowMcpForProject } = await import("../workflow-mcp-auto-prep.js");
-      prepareWorkflowMcpForProject(ctx, basePath);
-    }
+    await prepareWorkflowMcpForHookContext(ctx, basePath);
 
     // Apply show_token_cost preference (#1515)
     try {
@@ -563,15 +574,7 @@ export function registerHooks(
     await syncServiceTierStatus(ctx);
     await applyDisabledModelProviderPolicy(ctx);
     await applyCompactionThresholdOverride(ctx);
-    // Skip MCP auto-prep when running inside an auto-worktree. The worktree
-    // already has .mcp.json from createAutoWorktree, and re-running the writer
-    // post-chdir rewrites the file mid-run (non-idempotent due to cwd-relative
-    // CLI path resolution), dirtying the tree and breaking the milestone merge.
-    const { isInAutoWorktree } = await import("../auto-worktree.js");
-    if (!isInAutoWorktree(basePath)) {
-      const { prepareWorkflowMcpForProject } = await import("../workflow-mcp-auto-prep.js");
-      prepareWorkflowMcpForProject(ctx, basePath);
-    }
+    await prepareWorkflowMcpForHookContext(ctx, basePath);
     await loadToolApiKeysForSession();
     if (!isAutoActive()) {
       ctx.ui.setWidget("gsd-progress", undefined);
@@ -608,9 +611,26 @@ export function registerHooks(
     }
     clearDeferredApprovalGate(beforeAgentBasePath);
 
+    // session_start can fire before the active provider has settled. By
+    // before_agent_start, Claude Code CLI sessions should get the same
+    // project MCP config that /gsd mcp init would write.
+    await prepareWorkflowMcpForHookContext(ctx, beforeAgentBasePath);
+
+    let systemPrompt = event.systemPrompt;
+    const { appendDiscoveredSkillsFallback, hasSkillSnapshot, refreshCatalogForNewSkills } = await import("../skill-discovery.js");
+    if (hasSkillSnapshot()) {
+      const loadedSkills = await refreshCatalogForNewSkills({
+        reload: () => (ctx as ExtensionContext & { reload: () => Promise<void> }).reload(),
+        notify: (message, level) => ctx.ui.notify(message, level),
+      });
+      if (loadedSkills.length > 0) {
+        systemPrompt = appendDiscoveredSkillsFallback(ctx.getSystemPrompt(), loadedSkills);
+      }
+    }
+
     // GSD's own context injection (existing behavior — unchanged).
     const { buildBeforeAgentStartResult } = await import("./system-context.js");
-    const gsdResult = await buildBeforeAgentStartResult(event, ctx);
+    const gsdResult = await buildBeforeAgentStartResult({ ...event, systemPrompt }, ctx);
 
     // Refresh the snapshot used by ecosystem getPhase()/getActiveUnit().
     // deriveState has its own ~100ms cache so this is cheap on repeat calls.
@@ -623,7 +643,7 @@ export function registerHooks(
 
     // Chain ecosystem handlers using pi's runner.ts chaining protocol:
     // each handler sees the systemPrompt mutated by prior handlers.
-    let currentSystemPrompt = gsdResult?.systemPrompt ?? event.systemPrompt;
+    let currentSystemPrompt = gsdResult?.systemPrompt ?? systemPrompt;
     // `any` because pi's BeforeAgentStartEventResult.message uses an internal
     // CustomMessage type that's not re-exported (see ecosystem/gsd-extension-api.ts).
     let lastMessage: any = gsdResult?.message;
@@ -947,29 +967,29 @@ export function registerHooks(
     const activeUnitType = dash.currentUnit?.type ?? guidedUnit?.unitType;
     if (activeUnitType) {
       const manifest = resolveManifest(activeUnitType);
-      if (manifest) {
-        let planningInput = "";
-        let agentClasses: string[] | undefined;
-        if (isToolCallEventType("write", event)) {
-          planningInput = event.input.path;
-        } else if (isToolCallEventType("edit", event)) {
-          planningInput = event.input.path;
-        } else if (isToolCallEventType("bash", event)) {
-          planningInput = event.input.command;
-        } else if (event.toolName === "subagent" || event.toolName === "task") {
-          // Subagent inputs use { agent }, { tasks: [{ agent }] }, or { chain: [{ agent }] }.
-          agentClasses = extractSubagentAgentClasses((event as { input?: unknown }).input);
-        }
-        const planningGuard = shouldBlockPlanningUnit(
-          event.toolName,
-          planningInput,
-          dash.basePath || guidedUnit?.basePath || discussionBasePath,
-          activeUnitType,
-          manifest.tools,
-          agentClasses,
-        );
-        if (planningGuard.block) return planningGuard;
+      let planningInput = "";
+      let agentClasses: string[] | undefined;
+      if (isToolCallEventType("write", event)) {
+        planningInput = event.input.path;
+      } else if (isToolCallEventType("edit", event)) {
+        planningInput = event.input.path;
+      } else if (isToolCallEventType("bash", event)) {
+        planningInput = event.input.command;
+      } else if (event.toolName === "subagent" || event.toolName === "task") {
+        // Subagent inputs use { agent }, { tasks: [{ agent }] }, or { chain: [{ agent }] }.
+        agentClasses = extractSubagentAgentClasses((event as { input?: unknown }).input);
       }
+      const planningGuard = shouldBlockPlanningUnit(
+        event.toolName,
+        planningInput,
+        dash.basePath || guidedUnit?.basePath || discussionBasePath,
+        activeUnitType,
+        manifest?.tools,
+        agentClasses,
+        (event as { input?: unknown }).input,
+        dash.currentUnit?.id,
+      );
+      if (planningGuard.block) return planningGuard;
     }
 
     // ── Worktree-isolation write gate (#5199) ────────────────────────────
@@ -1019,9 +1039,8 @@ export function registerHooks(
     if (result.block) return result;
   });
 
-  // ── Safety harness: evidence collection + destructive command warnings ──
+  // ── Safety harness: evidence collection + destructive command blocking ──
   pi.on("tool_call", async (event, ctx) => {
-    if (!isAutoActive()) return;
     markToolStart(event.toolCallId, event.toolName);
     safetyRecordToolCall(event.toolCallId, event.toolName, event.input as Record<string, unknown>);
 
@@ -1038,17 +1057,28 @@ export function registerHooks(
       }
     }
 
-    // Destructive command classification (warn only, never block)
+    // Destructive command classification + hard gate in all modes.
     if (isToolCallEventType("bash", event)) {
       const classification = classifyCommand(event.input.command);
       if (classification.destructive) {
+        const reason = [
+          "HARD BLOCK: destructive Bash command requires explicit human confirmation.",
+          `Detected: ${classification.labels.join(", ")}`,
+          "Run this via ask_user_questions, wait for the user's response,",
+          "then issue the command only when confirmed in the current turn.",
+        ].join(" ");
         safetyLogWarning("safety", `destructive command: ${classification.labels.join(", ")}`, {
           command: String(event.input.command).slice(0, 200),
         });
-        ctx.ui.notify(
-          `Destructive command detected: ${classification.labels.join(", ")}`,
-          "warning",
-        );
+        if (ctx) {
+          await maybePauseAutoForApprovalGate(
+            ctx,
+            pi,
+            isAutoActive(),
+            "Depth confirmation is waiting for your answer — pausing auto-mode.",
+          );
+        }
+        return { block: true, reason };
       }
     }
   });
@@ -1307,15 +1337,37 @@ export function registerHooks(
   // Extensions can override tool set after model selection by returning { toolNames: [...] }
   // Return undefined to let the built-in provider compatibility filtering proceed.
   pi.on("adjust_tool_set", async (event) => {
-    if (isFullGsdToolSurfaceRequested()) return undefined;
     const removed = new Set(event.filteredTools);
-    const providerCompatible = event.activeToolNames.filter((name) => !removed.has(name));
+    const compatible = event.activeToolNames.filter((name) => !removed.has(name));
+    // Always drop backwards-compatibility workflow aliases from the advertised
+    // surface; they remain registered/callable but never cost schema tokens.
+    // Drop the heavy browser surface too unless explicitly opted in — it stays
+    // registered, so auto run-uat (which scopes browser tools in from the full
+    // registry) still works. Both filters are skipped under full-tools mode.
+    const fullToolsRequested = isFullGsdToolSurfaceRequested();
+    const dropAliases = !fullToolsRequested;
+    const dropBrowser = !fullToolsRequested && !isBrowserToolSurfaceRequested();
+    const aliasFilteredCompatible = compatible.filter(
+      (name) => !(dropAliases && isWorkflowAliasTool(name)),
+    );
+    const providerCompatible = aliasFilteredCompatible.filter(
+      (name) => !(dropBrowser && isBrowserTool(name)),
+    );
+    const surfaceReduced = providerCompatible.length !== compatible.length;
+    if (fullToolsRequested) {
+      return surfaceReduced ? { toolNames: providerCompatible } : undefined;
+    }
     const registeredToolNames = resolveRegisteredToolNames(pi, event.activeToolNames);
+    const compatibleRegisteredToolNames = filterToolsForProvider(
+      registeredToolNames,
+      event.selectedModelApi,
+      event.selectedModelProvider,
+    ).compatible.filter((name) => !(dropAliases && isWorkflowAliasTool(name)));
     const guidedUnit = getGuidedUnitContext();
     const requestScoped = buildRequestScopedGsdToolSet(
-      providerCompatible,
+      guidedUnit?.unitType === "run-uat" ? aliasFilteredCompatible : providerCompatible,
       event.requestCustomMessages,
-      registeredToolNames,
+      guidedUnit?.unitType === "run-uat" ? compatibleRegisteredToolNames : registeredToolNames,
       guidedUnit?.unitType,
     );
     if (requestScoped) {
@@ -1325,15 +1377,25 @@ export function registerHooks(
     if (dash.active && dash.currentUnit) {
       return {
         toolNames: buildMinimalAutoGsdToolSet(
-          providerCompatible,
+          dash.currentUnit.type === "run-uat" ? aliasFilteredCompatible : providerCompatible,
           dash.currentUnit.type,
-          resolveRegisteredToolNames(pi, event.activeToolNames),
+          dash.currentUnit.type === "run-uat"
+            ? compatibleRegisteredToolNames
+            : resolveRegisteredToolNames(pi, event.activeToolNames),
         ),
       };
     }
     if (isGeneralGsdToolScopingRequested()) {
       return { toolNames: buildMinimalGsdToolSet(providerCompatible) };
     }
-    return undefined;
+    // Plain interactive chat (no GSD workflow command driving this request)
+    // never needs the full ~50-tool workflow surface — scope it to the minimal
+    // GSD set by default (all non-GSD tools are preserved). Requests carrying a
+    // gsd-* customType keep their existing surface, so no command is stranded.
+    // Set PI_GSD_FULL_TOOLS=1 (handled above) to restore the full surface.
+    if (!requestHasGsdCustomType(event.requestCustomMessages)) {
+      return { toolNames: buildMinimalGsdToolSet(providerCompatible) };
+    }
+    return surfaceReduced ? { toolNames: providerCompatible } : undefined;
   });
 }

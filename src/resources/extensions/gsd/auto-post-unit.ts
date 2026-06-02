@@ -68,7 +68,7 @@ import {
   runMilestoneCloseoutGitHub,
 } from "./milestone-closeout.js";
 import type { AutoSession, SidecarItem } from "./auto/session.js";
-import { getEvidence, clearEvidenceFromDisk } from "./safety/evidence-collector.js";
+import { getEvidence, clearEvidenceFromDisk, isExecutionToolName } from "./safety/evidence-collector.js";
 import { validateFileChanges } from "./safety/file-change-validator.js";
 import { crossReferenceEvidence, type ClaimedEvidence } from "./safety/evidence-cross-ref.js";
 import { validateContent } from "./safety/content-validator.js";
@@ -94,7 +94,7 @@ import {
 import { validateArtifact } from "./schemas/validate.js";
 import { verificationRetryKey } from "./auto/verification-retry-policy.js";
 import { getLedger } from "./metrics.js";
-import { getUnitCostSpikeAction } from "./auto-budget.js";
+import { getUnitCostSpikeAction, resolveUnitCostSpikeMultiplier } from "./auto-budget.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { parseRetrospectiveMarkdown, resolveRetrospectivePaths } from "./retrospective-artifacts.js";
 import {
@@ -117,6 +117,36 @@ const MAX_VERIFICATION_RETRIES = 3;
 /** Keep failure toasts short while still showing concrete examples. */
 const MAX_NOTIFICATION_DETAILS = 3;
 const NOTIFICATION_BULLET = "•";
+
+function isParallelResearchUnit(unitType: string, unitId: string): boolean {
+  return unitType === "research-slice" && unitId.endsWith("/parallel-research");
+}
+
+function shouldAttemptPlanRegeneration(unitType: string, unitId: string): boolean {
+  if (unitType === "triage-captures" || unitType === "quick-task") return false;
+  if (isParallelResearchUnit(unitType, unitId)) return false;
+  const { milestone: mid, slice: sid } = parseUnitId(unitId);
+  return !!mid && !!sid;
+}
+
+export const _shouldAttemptPlanRegenerationForTest = shouldAttemptPlanRegeneration;
+
+export function maybeWriteParallelResearchCostSpikeBlocker(
+  unitType: string,
+  unitId: string,
+  basePath: string,
+  unitCostUsd: number,
+  rollingAvgUsd: number,
+): string | null {
+  if (!isParallelResearchUnit(unitType, unitId)) return null;
+  return writeBlockerPlaceholder(
+    unitType,
+    unitId,
+    basePath,
+    `Parallel slice research cost spike detected (${unitCostUsd.toFixed(2)} vs avg ${rollingAvgUsd.toFixed(2)}). ` +
+      "Skipping the aggregate sentinel so dispatch can fall back to per-slice research.",
+  );
+}
 
 export function resolveCloseoutGitAction(
   uokFlags: ReturnType<typeof resolveUokFlags>,
@@ -208,13 +238,45 @@ function completeSliceReopenReplanHandoffDetected(
     agentEndMessagesIncludeToolCall(agentEndMessages, "gsd_task_reopen") ||
     agentEndMessagesMentionTool(agentEndMessages, "gsd_task_reopen") ||
     unitActivityMentionsTool(s.basePath, unitType, unitId, "gsd_task_reopen") ||
-    unitActivityMentionsTool(s.canonicalProjectRoot, unitType, unitId, "gsd_task_reopen") ||
+    unitActivityMentionsTool(s.canonicalProjectRoot, unitType, unitId, "gsd_task_reopen")
+  );
+}
+
+function completeSliceReplanSignalDetected(
+  s: AutoSession,
+  agentEndMessages: unknown[] | undefined,
+): boolean {
+  if (s.currentUnit?.type !== "complete-slice") return false;
+  return (
     agentEndMessagesIncludeSuccessfulToolResult(agentEndMessages, "gsd_replan_slice") ||
     agentEndMessagesIncludeToolCall(agentEndMessages, "gsd_replan_slice") ||
     agentEndMessagesMentionTool(agentEndMessages, "gsd_replan_slice") ||
-    unitActivityMentionsTool(s.basePath, unitType, unitId, "gsd_replan_slice") ||
-    unitActivityMentionsTool(s.canonicalProjectRoot, unitType, unitId, "gsd_replan_slice")
+    unitActivityMentionsTool(s.basePath, s.currentUnit.type, s.currentUnit.id, "gsd_replan_slice") ||
+    unitActivityMentionsTool(s.canonicalProjectRoot, s.currentUnit.type, s.currentUnit.id, "gsd_replan_slice")
   );
+}
+
+function completeSliceValidReplanOutcomeDetected(
+  s: AutoSession,
+  agentEndMessages: unknown[] | undefined,
+): boolean {
+  if (s.currentUnit?.type !== "complete-slice") return false;
+  const { milestone: mid, slice: sid } = parseUnitId(s.currentUnit.id);
+  if (!mid || !sid) return false;
+
+  if (!completeSliceReplanSignalDetected(s, agentEndMessages)) return false;
+
+  const replanPath = resolveSliceFile(s.basePath, mid, sid, "REPLAN");
+  const canonicalReplanPath = resolveSliceFile(s.canonicalProjectRoot, mid, sid, "REPLAN");
+  const hasReplanArtifact = (
+    Boolean(replanPath && existsSync(replanPath)) ||
+    Boolean(canonicalReplanPath && existsSync(canonicalReplanPath))
+  );
+  if (!hasReplanArtifact) return false;
+
+  if (!isDbAvailable()) return true;
+  const slice = getSlice(mid, sid);
+  return Boolean(slice && !isClosedStatus(slice.status));
 }
 
 function formatPreExecutionCheckDetail(check: PreExecutionCheckJSON): string {
@@ -338,6 +400,50 @@ function stripKnownIdPrefix(value: string | undefined | null, id: string): strin
   return raw;
 }
 
+function parseReactiveBatchTaskIds(unitId: string): string[] {
+  const { task: batchPart } = parseUnitId(unitId);
+  if (!batchPart?.startsWith("reactive+")) return [];
+
+  const rawIds = batchPart
+    .slice("reactive+".length)
+    .split(",")
+    .map((taskId) => taskId.trim().toUpperCase())
+    .filter(Boolean);
+
+  const unique = new Set<string>();
+  for (const taskId of rawIds) {
+    unique.add(taskId);
+  }
+  return [...unique];
+}
+
+function dedupePaths(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    if (!seen.has(value)) {
+      seen.add(value);
+      result.push(value);
+    }
+  }
+  return result;
+}
+
+function getPlannedKeyFiles(tasks: Array<
+  { expected_output?: string[]; files?: string[]; key_files?: string[] }
+>): string[] {
+  return dedupePaths(
+    tasks.flatMap((taskRow) => [
+      ...(taskRow.expected_output ?? []),
+      ...(taskRow.files ?? []),
+      ...(taskRow.key_files ?? []),
+    ]),
+  );
+}
+
+export const _parseReactiveBatchTaskIdsForTest = parseReactiveBatchTaskIds;
+export const _getPlannedKeyFilesForTest = getPlannedKeyFiles;
+
 function resolveVerificationFailureMarkerPath(
   unitType: string,
   unitId: string,
@@ -425,6 +531,40 @@ async function buildTaskCommitContextForUnit(
   };
 }
 
+async function buildReactiveTaskCommitContext(
+  _basePath: string,
+  unitId: string,
+): Promise<TaskCommitContext | undefined> {
+  const { milestone: mid, slice: sid } = parseUnitId(unitId);
+  if (!mid || !sid || !isDbAvailable()) return undefined;
+
+  const batchTaskIds = parseReactiveBatchTaskIds(unitId);
+  if (batchTaskIds.length === 0) return undefined;
+
+  const milestone = getMilestone(mid);
+  const slice = getSlice(mid, sid);
+  const taskRows = batchTaskIds
+    .map((tid) => getTask(mid, sid, tid))
+    .filter((taskRow): taskRow is NonNullable<ReturnType<typeof getTask>> => taskRow !== null);
+
+  const keyFiles = getPlannedKeyFiles(taskRows);
+  if (taskRows.length === 0 || keyFiles.length === 0) return undefined;
+
+  const taskLabel = taskRows.map((row) => row.id).join(",");
+
+  return {
+    taskId: `${sid}/${taskLabel}`,
+    taskDisplayId: "reactive-batch",
+    taskTitle: `Reactive batch: ${taskLabel}`,
+    milestoneId: mid,
+    milestoneTitle: stripKnownIdPrefix(milestone?.title, mid),
+    sliceId: sid,
+    sliceTitle: stripKnownIdPrefix(slice?.title, sid),
+    oneLiner: `Reactive execute for ${taskLabel}`,
+    keyFiles,
+  };
+}
+
 async function runPostUnitGitHubSyncIfNeeded(
   basePath: string,
   unit: NonNullable<AutoSession["currentUnit"]>,
@@ -509,12 +649,6 @@ function shouldRemovePendingRetrospectiveAfterFiling(
 }
 
 export const _shouldRemovePendingRetrospectiveAfterFilingForTest = shouldRemovePendingRetrospectiveAfterFiling;
-
-function isExecutionToolName(name: unknown): boolean {
-  if (typeof name !== "string") return false;
-  const normalized = name.trim().toLowerCase();
-  return normalized === "bash" || normalized === "gsd_exec";
-}
 
 export function _hasExecutionToolCallsInSessionForTest(entries: readonly unknown[]): boolean {
   for (const entry of entries) {
@@ -928,6 +1062,8 @@ export async function autoCommitUnit(
 
     if (unitType === "execute-task") {
       taskContext = await buildTaskCommitContextForUnit(basePath, unitId);
+    } else if (unitType === "reactive-execute") {
+      taskContext = await buildReactiveTaskCommitContext(basePath, unitId);
     }
 
     _resetHasChangesCache();
@@ -989,6 +1125,21 @@ async function runCloseoutGitAction(
       const { milestone: mid, slice: sid, task: tid } = parseUnitId(unit.id);
       if (mid && sid && tid && isDbAvailable()) {
         targetRepositories = getTask(mid, sid, tid)?.target_repositories;
+      }
+    } else if (turnAction === "commit" && unit.type === "reactive-execute") {
+      taskContext = await buildReactiveTaskCommitContext(s.basePath, unit.id);
+      const { milestone: mid, slice: sid } = parseUnitId(unit.id);
+      if (mid && sid && isDbAvailable()) {
+        const repositories = new Set<string>();
+        for (const tid of parseReactiveBatchTaskIds(unit.id)) {
+          const taskRow = getTask(mid, sid, tid);
+          for (const repoId of taskRow?.target_repositories ?? []) {
+            repositories.add(repoId);
+          }
+        }
+        if (repositories.size > 0) {
+          targetRepositories = [...repositories];
+        }
       }
     }
 
@@ -1421,12 +1572,24 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         const { milestone: sMid, slice: sSid, task: sTid } = parseUnitId(s.currentUnit.id);
 
         // File change validation (execute-task only, after unit execution)
-        if (safetyConfig.file_change_validation && s.currentUnit.type === "execute-task" && sMid && sSid && sTid && isDbAvailable()) {
+        if (safetyConfig.file_change_validation && s.currentUnit.type === "execute-task" && sMid && sSid && sTid) {
           try {
-            const taskRow = getTask(sMid, sSid, sTid);
-            if (taskRow) {
-              const expectedOutput = taskRow.expected_output ?? [];
-              const plannedFiles = taskRow.files ?? [];
+            const sliceTaskRows = isDbAvailable()
+              ? getSliceTasks(sMid, sSid).filter((t) => isClosedStatus(t.status) || t.id === sTid)
+              : [];
+
+            if (sliceTaskRows.length > 0) {
+              const expectedOutput = getPlannedKeyFiles(
+                sliceTaskRows.map((taskRow) => ({
+                  expected_output: taskRow.expected_output,
+                  files: taskRow.files,
+                })),
+              );
+              const plannedFiles = getPlannedKeyFiles(
+                sliceTaskRows.map((taskRow) => ({
+                  files: taskRow.files,
+                })),
+              );
               const audit = validateFileChanges(s.basePath, expectedOutput, plannedFiles, safetyConfig.file_change_allowlist);
               if (audit && audit.violations.length > 0) {
                 const warnings = audit.violations.filter(v => v.severity === "warning");
@@ -1438,6 +1601,30 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
                     `Safety: ${warnings.length} unexpected file change(s) outside task plan`,
                     "warning",
                   );
+                }
+              }
+            } else {
+              const taskRow = getTask(sMid, sSid, sTid);
+              if (taskRow) {
+                const expectedOutput = taskRow.expected_output ?? [];
+                const plannedFiles = taskRow.files ?? [];
+                const audit = validateFileChanges(
+                  s.basePath,
+                  expectedOutput,
+                  plannedFiles,
+                  safetyConfig.file_change_allowlist,
+                );
+                if (audit && audit.violations.length > 0) {
+                  const warnings = audit.violations.filter(v => v.severity === "warning");
+                  for (const v of warnings) {
+                    logWarning("safety", `file-change: ${v.file} — ${v.reason}`);
+                  }
+                  if (warnings.length > 0) {
+                    ctx.ui.notify(
+                      `Safety: ${warnings.length} unexpected file change(s) outside task plan`,
+                      "warning",
+                    );
+                  }
                 }
               }
             }
@@ -1490,11 +1677,11 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
                       suppressedWarning: "evidence-empty-but-session-has-exec-calls",
                     });
                   } else {
-                    logWarning("safety", `evidence mismatch: ${missingCommandMismatches.length} claimed command(s) not found in bash calls`);
-                  ctx.ui.notify(
-                    `Safety: task ${sTid} claimed ${missingCommandMismatches.length} command(s) not found in recorded bash calls`,
-                    "warning",
-                  );
+                    logWarning("safety", `evidence mismatch: ${missingCommandMismatches.length} claimed command(s) not found in recorded execution calls`);
+                    ctx.ui.notify(
+                      `Safety: task ${sTid} claimed ${missingCommandMismatches.length} command(s) not found in recorded execution calls`,
+                      "warning",
+                    );
                   }
                 }
 
@@ -1632,7 +1819,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
       if (!triggerArtifactVerified) {
         try {
           const { milestone: mid, slice: sid } = parseUnitId(s.currentUnit.id);
-          if (mid && sid) {
+          if (mid && sid && shouldAttemptPlanRegeneration(s.currentUnit.type, s.currentUnit.id)) {
             // Phase C: write to the canonical project root (#5236 scope)
             // so non-symlinked worktrees no longer maintain a separate
             // local .gsd/ projection. copyPlanningArtifacts has been
@@ -1818,7 +2005,29 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           "warning",
         );
         return "continue";
-      } else if (!triggerArtifactVerified && !isDbAvailable()) {
+      } else if (
+        !triggerArtifactVerified &&
+        completeSliceValidReplanOutcomeDetected(s, opts?.agentEndMessages)
+      ) {
+        const retryKey = `${s.currentUnit.type}:${s.currentUnit.id}`;
+        s.pendingVerificationRetry = null;
+        s.verificationRetryCount.delete(retryKey);
+        s.verificationRetryFailureHashes.delete(retryKey);
+        debugLog("postUnit", {
+          phase: "artifact-verify-complete-slice-replan-outcome",
+          unitType: s.currentUnit.type,
+          unitId: s.currentUnit.id,
+        });
+        ctx.ui.notify(
+          `complete-slice ${s.currentUnit.id} produced a valid replan outcome; continuing orchestration instead of retrying closeout.`,
+          "warning",
+        );
+        return "continue";
+      } else if (
+        !triggerArtifactVerified &&
+        !isDbAvailable() &&
+        !completeSliceReplanSignalDetected(s, opts?.agentEndMessages)
+      ) {
         debugLog("postUnit", { phase: "artifact-verify-skip-db-unavailable", unitType: s.currentUnit.type, unitId: s.currentUnit.id });
         const dbSkipDiag = diagnoseExpectedArtifact(s.currentUnit.type, s.currentUnit.id, verificationBasePath);
         ctx.ui.notify(
@@ -1876,7 +2085,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
             await pauseAuto(ctx, pi);
             return "dispatched";
           }
-          if (getUnitCostSpikeAction(unitCostUsd, rollingAvgUsd, 3.0) === "pause") {
+          if (getUnitCostSpikeAction(unitCostUsd, rollingAvgUsd, resolveUnitCostSpikeMultiplier(prefs)) === "pause") {
             s.pendingVerificationRetry = null;
             s.verificationRetryCount.delete(retryKey);
             s.verificationRetryFailureHashes.delete(retryKey);
@@ -1901,8 +2110,17 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
               );
               return "continue";
             }
+            const parallelBlocker = maybeWriteParallelResearchCostSpikeBlocker(
+              s.currentUnit.type,
+              s.currentUnit.id,
+              verificationBasePath,
+              unitCostUsd,
+              rollingAvgUsd,
+            );
             ctx.ui.notify(
-              `Unit ${s.currentUnit.id} cost spike detected (${unitCostUsd.toFixed(2)} vs avg ${rollingAvgUsd.toFixed(2)}) — pausing auto-mode.`,
+              parallelBlocker
+                ? `Unit ${s.currentUnit.id} cost spike detected (${unitCostUsd.toFixed(2)} vs avg ${rollingAvgUsd.toFixed(2)}) — wrote parallel blocker and pausing auto-mode.`
+                : `Unit ${s.currentUnit.id} cost spike detected (${unitCostUsd.toFixed(2)} vs avg ${rollingAvgUsd.toFixed(2)}) — pausing auto-mode.`,
               "error",
             );
             await pauseAuto(ctx, pi);
@@ -2137,6 +2355,11 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
           "info",
         );
 
+        await s.orchestration?.retryActiveUnit({
+          unitType: trigger.unitType,
+          unitId: trigger.unitId,
+        });
+
         // ── State reset: undo the completion so deriveState re-derives the unit ──
         try {
           const { milestone: mid, slice: sid, task: tid } = parseUnitId(trigger.unitId);
@@ -2148,8 +2371,8 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
               await renderPlanCheckboxes(s.canonicalProjectRoot, mid, sid);
             } catch (dbErr) {
               // DB unavailable — fail explicitly rather than silently reverting to markdown mutation.
-              // Use 'gsd recover' to rebuild DB state from disk if needed.
-              logError("engine", `retry state-reset failed (DB unavailable): ${(dbErr as Error).message}. Run 'gsd recover' to reconcile.`);
+              // Use 'gsd recover --confirm' to import markdown into the DB if needed.
+              logError("engine", `retry state-reset failed (DB unavailable): ${(dbErr as Error).message}. Run 'gsd recover --confirm' to import markdown into the DB.`);
             }
           }
 

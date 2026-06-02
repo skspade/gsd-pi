@@ -67,16 +67,18 @@ Or run `gsd config` and paste your key when prompted.
 
 **Option B — Claude Code CLI:**
 
-If you have a Claude Pro or Max subscription, you can authenticate through Anthropic's official Claude Code CLI. Install it, sign in with `claude`, then GSD will detect and route through it automatically:
+If you have a Claude Pro, Max, Team, or Enterprise subscription, you can authenticate through Anthropic's official Claude Code CLI. Install it, sign in with `claude`, then GSD will detect and route through it automatically:
 
 ```bash
-# Install Claude Code CLI (see https://docs.anthropic.com/en/docs/claude-code)
+# Install Claude Code CLI first, then sign in inside Claude Code.
 claude
-# Sign in when prompted, then start GSD
+# Run /login if prompted or if you need to switch accounts, then start GSD.
 gsd
 ```
 
 GSD detects your local Claude Code installation and uses it as the authenticated Anthropic surface. This is the TOS-compliant path for subscription users — GSD never handles your subscription credentials directly.
+
+For the full walkthrough, including install commands, `/login`, verification, and troubleshooting, see [Use Claude Code With a Claude Subscription](./claude-code-subscription.md).
 
 > **Note:** GSD does not support browser-based OAuth sign-in for Anthropic. Use an API key or the Claude Code CLI instead.
 
@@ -293,6 +295,8 @@ export ANTHROPIC_VERTEX_PROJECT_ID="my-project-id"
 ```
 
 Or set `GOOGLE_CLOUD_PROJECT` and ensure ADC credentials exist at `~/.config/gcloud/application_default_credentials.json`.
+
+Supported Claude-on-Vertex models are built in and appear automatically once Vertex auth is configured. You do not need a `models.json` entry unless you want to override metadata or route through a proxy.
 
 ### Azure OpenAI
 
