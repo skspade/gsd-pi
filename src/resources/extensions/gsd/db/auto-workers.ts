@@ -27,6 +27,7 @@ import {
 import { normalizeRealPath } from "../paths.js";
 
 const HEARTBEAT_TTL_SECONDS = 60;
+const HUNG_HEARTBEAT_TTL_SECONDS = HEARTBEAT_TTL_SECONDS * 10;
 // Version label is for diagnostics only — embedded in audit_events and
 // workers.version. Bumping this manually on protocol changes is fine; we
 // don't pull it from package.json to avoid module-load filesystem I/O.
@@ -235,6 +236,11 @@ export function autoWorkerHeartbeatTtlSeconds(): number {
   return HEARTBEAT_TTL_SECONDS;
 }
 
+/** Test/janitor helper: live workers silent beyond this window are treated as hung. */
+export function autoWorkerHungHeartbeatTtlSeconds(): number {
+  return HUNG_HEARTBEAT_TTL_SECONDS;
+}
+
 function isWorkerProcessAlive(candidate: Pick<AutoWorkerRow, "host" | "pid">): boolean {
   const pid = candidate.pid;
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -307,4 +313,75 @@ export function findStaleWorkerForProject(
       normalizeRealPath(candidate.project_root_realpath) === canonicalProjectRoot
       && !isWorkerProcessAlive(candidate),
   ) ?? null;
+}
+
+/**
+ * Find a worker whose PID is still alive but whose heartbeat has been silent
+ * long enough that startup should treat it as wedged, not healthy.
+ *
+ * A normal lapsed heartbeat can happen during laptop sleep or a long event-loop
+ * stall; the larger hung threshold is reserved for the "process alive but no
+ * progress/heartbeat for minutes" failure mode.
+ */
+export function findHungWorkerForProject(
+  projectRootRealpath: string,
+): AutoWorkerRow | null {
+  if (!isDbAvailable()) return null;
+  const db = _getAdapter()!;
+  const cutoffMs = Date.now() - HUNG_HEARTBEAT_TTL_SECONDS * 1000;
+  const cutoffIso = new Date(cutoffMs).toISOString();
+
+  const latestActiveRow = db.prepare(
+    `SELECT worker_id, host, pid, started_at, version,
+            last_heartbeat_at, status, project_root_realpath
+     FROM workers
+     WHERE project_root_realpath = :project_root
+       AND status = 'active'
+     ORDER BY started_at DESC
+     LIMIT 1`,
+  ).get({ ":project_root": projectRootRealpath }) as AutoWorkerRow | undefined;
+  if (
+    latestActiveRow
+    && latestActiveRow.last_heartbeat_at < cutoffIso
+    && isWorkerProcessAlive(latestActiveRow)
+  ) {
+    return latestActiveRow;
+  }
+
+  const row = db.prepare(
+    `SELECT worker_id, host, pid, started_at, version,
+            last_heartbeat_at, status, project_root_realpath
+     FROM workers
+     WHERE project_root_realpath = :project_root
+       AND status = 'active'
+       AND last_heartbeat_at < :cutoff
+     ORDER BY started_at DESC
+     LIMIT 1`,
+  ).get({ ":project_root": projectRootRealpath, ":cutoff": cutoffIso }) as AutoWorkerRow | undefined;
+  if (row && isWorkerProcessAlive(row)) return row;
+
+  const canonicalProjectRoot = normalizeRealPath(projectRootRealpath);
+  const hungRows = db.prepare(
+    `SELECT worker_id, host, pid, started_at, version,
+            last_heartbeat_at, status, project_root_realpath
+     FROM workers
+     WHERE status = 'active'
+       AND last_heartbeat_at < :cutoff
+     ORDER BY started_at DESC`,
+  ).all({ ":cutoff": cutoffIso }) as unknown as AutoWorkerRow[];
+  return hungRows.find(
+    (candidate) =>
+      normalizeRealPath(candidate.project_root_realpath) === canonicalProjectRoot
+      && isWorkerProcessAlive(candidate),
+  ) ?? null;
+}
+
+export function findRecoverableWorkerForProject(
+  projectRootRealpath: string,
+): { worker: AutoWorkerRow; reason: "dead-worker" | "hung-worker" } | null {
+  const stale = findStaleWorkerForProject(projectRootRealpath);
+  if (stale) return { worker: stale, reason: "dead-worker" };
+  const hung = findHungWorkerForProject(projectRootRealpath);
+  if (hung) return { worker: hung, reason: "hung-worker" };
+  return null;
 }

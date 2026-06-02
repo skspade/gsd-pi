@@ -17,7 +17,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { gsdRoot, resolveGsdRootFile } from "./paths.js";
-import { readCrashLock, isLockProcessAlive, clearLock } from "./crash-recovery.js";
+import {
+  readCrashLock,
+  isRecoverableLock,
+  clearLock,
+  clearStaleWorkerLock,
+  terminateHungLockProcess,
+} from "./crash-recovery.js";
 import { rebuildState } from "./doctor.js";
 import { deriveState } from "./state.js";
 import { resolveMilestoneIntegrationBranch } from "./git-service.js";
@@ -307,10 +313,28 @@ export async function preDispatchHealthGate(basePath: string): Promise<PreDispat
       await ensureDbOpen(basePath);
     }
     const lock = readCrashLock(basePath);
-    if (lock && !isLockProcessAlive(lock)) {
+    if (lock && isRecoverableLock(lock)) {
+      if (lock.recoveryReason === "hung-worker") {
+        const stopped = await terminateHungLockProcess(lock);
+        if (!stopped.terminated) {
+          issues.push(`Hung auto-mode worker PID ${lock.pid} did not stop after SIGTERM`);
+          return {
+            proceed: false,
+            reason: `Hung auto-mode worker PID ${lock.pid} is still running. Stop it and re-run the command.`,
+            issues,
+            fixesApplied,
+            severity: "pause",
+          };
+        }
+      }
       // Auto-clear it since we're about to dispatch anyway
+      clearStaleWorkerLock(basePath);
       clearLock(basePath);
-      fixesApplied.push("cleared stale auto.lock before dispatch");
+      fixesApplied.push(
+        lock.recoveryReason === "hung-worker"
+          ? "stopped hung auto-mode worker before dispatch"
+          : "cleared stale auto.lock before dispatch",
+      );
     }
   } catch {
     // Non-fatal

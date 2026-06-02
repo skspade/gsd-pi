@@ -1768,7 +1768,7 @@ export function buildFinalAssistantContent(params: {
 }
 
 /**
- * Merge tool-call blocks from the active partial-message builder into the
+ * Merge tool-use blocks from the active partial-message builder into the
  * running list of intermediate tool calls, preserving order and de-duping
  * by tool-call id. Exposed for testing the F3 fix (final-turn tool calls
  * dropped when `result` arrives without a preceding synthetic `user`).
@@ -1779,10 +1779,10 @@ export function mergePendingToolCalls(
 ): AssistantMessage["content"] {
 	const alreadyIncluded = new Set<string>();
 	for (const block of intermediate) {
-		if (block.type === "toolCall") alreadyIncluded.add(block.id);
+		if (block.type === "toolCall" || block.type === "serverToolUse") alreadyIncluded.add(block.id);
 	}
 	for (const block of pending) {
-		if (block.type !== "toolCall") continue;
+		if (block.type !== "toolCall" && block.type !== "serverToolUse") continue;
 		if (alreadyIncluded.has(block.id)) continue;
 		alreadyIncluded.add(block.id);
 		intermediate.push(block);

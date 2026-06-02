@@ -225,6 +225,8 @@ async function dispatchDiscussForNextMilestoneWithBacklog(
   basePath: string,
   nextId: string,
 ): Promise<void> {
+  if (!(await runCreateMilestoneRecoveryPreflight(ctx, basePath))) return;
+
   const backlogContext = buildRequirementsBacklogDiscussContext(nextId);
   const discussMilestoneTemplates = inlineTemplate("context", "Context");
   const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx);
@@ -986,7 +988,9 @@ export function maybeHandleReadyPhraseWithoutFiles(event: { messages: any[] }, l
  * tool-use turn via `resetEmptyTurnCounter`.
  */
 const emptyTurnCounterByBase = new Map<string, number>();
+const ackOnlyCounterByBase = new Map<string, number>();
 const MAX_EMPTY_TURN_RETRIES = 2;
+const MAX_ACK_ONLY_DISCUSSION_RETRIES = 3;
 
 // Phrases that indicate the LLM is about to do something but has not yet.
 // Kept tight to avoid flagging legitimate narration like "I'll wait for your answer."
@@ -1003,8 +1007,117 @@ const COMMIT_INTENT_RE =
  * Called from handleAgentEnd when the last message contains tool_use blocks.
  */
 export function resetEmptyTurnCounter(basePath?: string): void {
-  if (basePath) emptyTurnCounterByBase.delete(basePath);
-  else emptyTurnCounterByBase.clear();
+  if (basePath) {
+    emptyTurnCounterByBase.delete(basePath);
+    ackOnlyCounterByBase.delete(basePath);
+  } else {
+    emptyTurnCounterByBase.clear();
+    ackOnlyCounterByBase.clear();
+  }
+}
+
+const ACK_ONLY_TEXTS = new Set([
+  "acknowledged",
+  "got it",
+  "got it, thanks",
+  "noted",
+  "ok",
+  "okay",
+  "thanks",
+  "thanks, got it",
+  "thanks, noted",
+  "thank you",
+  "understood",
+]);
+
+function isAckOnlyDiscussionText(text: string): boolean {
+  const normalized = text
+    .trim()
+    .replace(/[.!]+$/g, "")
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+  return ACK_ONLY_TEXTS.has(normalized);
+}
+
+/**
+ * Recover from guided milestone discussions where the LLM receives a
+ * structured answer and ends the turn with only "Noted." / "Got it.".
+ *
+ * The answer has already reached the model in this case; the failure is that
+ * no next question, depth check, draft save, or context write was emitted.
+ * While a discuss-to-auto handoff is pending and the milestone artifacts are
+ * still absent, inject a hidden continuation instruction instead of leaving
+ * the user to manually type "Continue".
+ */
+export function maybeHandleAckOnlyDiscussionTurn(event: { messages: any[] }, lookupBasePath?: string): boolean {
+  const entry = _getPendingAutoStart(lookupBasePath);
+  if (!entry) return false;
+
+  const lastMsg = event.messages[event.messages.length - 1];
+  if (!lastMsg) return false;
+
+  const { ctx, pi, basePath, milestoneId } = entry;
+  if (hasToolUse(lastMsg)) {
+    ackOnlyCounterByBase.delete(basePath);
+    return false;
+  }
+
+  const text = extractAssistantText(lastMsg).trim();
+  if (!text) return false;
+  if (READY_PHRASE_RE.test(text)) return false;
+
+  if (!isAckOnlyDiscussionText(text)) {
+    ackOnlyCounterByBase.delete(basePath);
+    return false;
+  }
+
+  clearPathCache();
+  const contextFile = resolveMilestoneFile(basePath, milestoneId, "CONTEXT");
+  const roadmapFile = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
+  if (contextFile || roadmapFile) {
+    ackOnlyCounterByBase.delete(basePath);
+    return false;
+  }
+
+  const count = (ackOnlyCounterByBase.get(basePath) ?? 0) + 1;
+  ackOnlyCounterByBase.set(basePath, count);
+
+  if (count > MAX_ACK_ONLY_DISCUSSION_RETRIES) {
+    ctx.ui.notify(
+      `Milestone ${milestoneId}: acknowledgement-only recovery fired ${count - 1} times without progress. ` +
+      `Stopping auto-nudge.`,
+      "error",
+    );
+    return false;
+  }
+
+  const contextRel = relMilestoneFile(basePath, milestoneId, "CONTEXT");
+  const roadmapRel = relMilestoneFile(basePath, milestoneId, "ROADMAP");
+  ctx.ui.notify(
+    `Milestone ${milestoneId}: assistant acknowledged the answer but did not continue. Prompting it to resume the discussion.`,
+    "info",
+  );
+
+  const nudge =
+    `Continue the ${milestoneId} milestone discussion. Your last turn only ` +
+    `acknowledged the user's answer ("${text}") while ${contextRel} and ` +
+    `${roadmapRel} are still missing. In this turn, follow the guided ` +
+    `discussion protocol: if the last structured question was cancelled or had ` +
+    `no usable answer, re-ask it; otherwise investigate only new unknowns, then ` +
+    `ask the next question round or the depth-verification question, or write ` +
+    `the required context after confirmed depth. Do not reply with only an ` +
+    `acknowledgement. Retry ${count}/${MAX_ACK_ONLY_DISCUSSION_RETRIES}.`;
+
+  try {
+    pi.sendMessage(
+      { customType: "gsd-discuss-ack-recovery", content: nudge, display: false },
+      { triggerTurn: true },
+    );
+  } catch (e) {
+    logWarning("guided", `ack-only discussion nudge sendMessage failed: ${(e as Error).message}`);
+    return false;
+  }
+  return true;
 }
 
 export function maybeHandleEmptyIntentTurn(
@@ -1412,6 +1525,38 @@ async function prepareAndBuildDiscussPrompt(
   return buildDiscussPrompt(nextId, preamble, basePath, pi, ctx, preparationContext);
 }
 
+export async function runCreateMilestoneRecoveryPreflight(
+  ctx: ExtensionCommandContext,
+  basePath: string,
+): Promise<boolean> {
+  try {
+    const { recoverMarkdownHierarchyIfDbEmpty } = await import("./migration-auto-check.js");
+    const result = await recoverMarkdownHierarchyIfDbEmpty(basePath);
+    if (result.action === "recovered") {
+      ctx.ui.notify(
+        `Recovered GSD database from existing markdown before starting a new milestone ` +
+        `(${result.afterDb.milestones}M/${result.afterDb.slices}S/${result.afterDb.tasks}T).`,
+        "success",
+      );
+      return true;
+    }
+    if (result.action === "recovery-required") {
+      ctx.ui.notify(
+        result.message ??
+          `Markdown planning artifacts do not match the authoritative DB. Run \`${result.recoveryCommand ?? "/gsd recover"}\` to import markdown explicitly, then start the milestone again.`,
+        "warning",
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    ctx.ui.notify(`GSD could not verify planning DB health before creating a milestone: ${message}`, "error");
+    logWarning("guided", `create milestone DB/markdown recovery preflight failed: ${message}`, { file: "guided-flow.ts" });
+    return false;
+  }
+}
+
 /**
  * Start discussion for a newly reserved milestone ID.
  * Greenfield (no milestone dirs yet) uses discuss.md (vision + project artifacts).
@@ -1425,6 +1570,8 @@ async function dispatchNewMilestoneDiscuss(
   stepMode: boolean,
   greenfieldPreamble?: string,
 ): Promise<void> {
+  if (!(await runCreateMilestoneRecoveryPreflight(ctx, basePath))) return;
+
   setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode });
 
   const isGreenfield = findMilestoneIds(basePath).length === 0;

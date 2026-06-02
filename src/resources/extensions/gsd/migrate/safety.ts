@@ -6,7 +6,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 
 import { ensureDbOpen } from "../bootstrap/dynamic-tools.js";
-import { readCrashLock, isLockProcessAlive } from "../crash-recovery.js";
+import { readCrashLock, isRecoverableLock, isLockProcessAlive } from "../crash-recovery.js";
 import { closeDatabase } from "../gsd-db.js";
 import { readPausedSessionMetadata } from "../interrupted-session.js";
 import { gsdRoot } from "../paths.js";
@@ -131,7 +131,7 @@ export async function assertMigrationTargetAvailable(targetRoot: string): Promis
 
   try {
     const lock = readCrashLock(targetRoot);
-    if (lock && lock.pid !== process.pid && isLockProcessAlive(lock)) {
+    if (lock && lock.pid !== process.pid && isLockProcessAlive(lock) && !isRecoverableLock(lock)) {
       throw new MigrationBlockedError(
         `Migration blocked - auto-mode appears to be running for this project (PID ${lock.pid}). Stop it before migrating.`,
       );

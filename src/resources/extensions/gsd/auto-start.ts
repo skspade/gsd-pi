@@ -28,7 +28,14 @@ import { migrateToExternalState, recoverFailedMigration } from "./migrate-extern
 import { collectSecretsFromManifest } from "../get-secrets-from-user.js";
 import { gsdRoot, resolveMilestoneFile } from "./paths.js";
 import { invalidateAllCaches } from "./cache.js";
-import { writeLock, clearLock, readCrashLock, isLockProcessAlive } from "./crash-recovery.js";
+import {
+  writeLock,
+  clearLock,
+  clearStaleWorkerLock,
+  readCrashLock,
+  isRecoverableLock,
+  terminateHungLockProcess,
+} from "./crash-recovery.js";
 import {
   acquireSessionLock,
   releaseSessionLock,
@@ -680,9 +687,25 @@ export async function bootstrapAutoSession(
   }
 
   const startupLock = readCrashLock(base);
-  if (startupLock && !isLockProcessAlive(startupLock)) {
+  if (startupLock && isRecoverableLock(startupLock)) {
+    if (startupLock.recoveryReason === "hung-worker") {
+      const stopped = await terminateHungLockProcess(startupLock);
+      if (!stopped.terminated) {
+        ctx.ui.notify(
+          `Hung auto-mode worker (PID ${startupLock.pid}) did not stop after SIGTERM. Stop it with \`kill ${startupLock.pid}\` and re-run /gsd auto.`,
+          "error",
+        );
+        return false;
+      }
+    }
+    clearStaleWorkerLock(base);
     clearLock(base);
-    ctx.ui.notify("Cleared stale auto-mode worker state.", "info");
+    ctx.ui.notify(
+      startupLock.recoveryReason === "hung-worker"
+        ? "Stopped hung auto-mode worker and cleared stale state."
+        : "Cleared stale auto-mode worker state.",
+      "info",
+    );
   }
 
   const lockResult = acquireSessionLock(base);

@@ -21,7 +21,7 @@ import {
   loadLedgerFromDisk, getAverageCostPerUnitType, getProjectTotals,
   formatCost, formatTokenCount, type UnitMetrics, type MetricsLedger,
 } from "./metrics.js";
-import { readCrashLock, isLockProcessAlive, formatCrashInfo, type LockData } from "./crash-recovery.js";
+import { readCrashLock, isRecoverableLock, isLockProcessAlive, formatCrashInfo, type LockData } from "./crash-recovery.js";
 import { runGSDDoctor, formatDoctorIssuesForPrompt, type DoctorIssue } from "./doctor.js";
 import { verifyExpectedArtifact } from "./auto-recovery.js";
 import { deriveState } from "./state.js";
@@ -867,14 +867,17 @@ export function detectWorktreeOrphans(
 
 function detectCrash(crashLock: LockData | null, anomalies: ForensicAnomaly[]): void {
   if (!crashLock) return;
-  if (isLockProcessAlive(crashLock)) return; // Process still running, not a crash
+  if (!isRecoverableLock(crashLock)) return; // Healthy live process, not a crash.
+  const alive = isLockProcessAlive(crashLock);
 
   anomalies.push({
     type: "crash",
     severity: "error",
     unitType: crashLock.unitType,
     unitId: crashLock.unitId,
-    summary: `Stale crash lock: PID ${crashLock.pid} is dead`,
+    summary: alive
+      ? `Hung auto-mode worker: PID ${crashLock.pid} is alive but not heartbeating`
+      : `Stale crash lock: PID ${crashLock.pid} is dead`,
     details: formatCrashInfo(crashLock),
   });
 }

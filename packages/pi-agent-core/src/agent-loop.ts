@@ -219,7 +219,7 @@ async function runLoop(
 			}
 
 			// Check for tool calls
-			const toolCalls = message.content.filter((c) => c.type === "toolCall");
+			const toolCalls = getExecutableToolCalls(message);
 
 			const toolResults: ToolResultMessage[] = [];
 			hasMoreToolCalls = false;
@@ -433,7 +433,7 @@ async function executeToolCalls(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
-	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
+	const toolCalls = getExecutableToolCalls(assistantMessage);
 	const hasSequentialToolCall = toolCalls.some(
 		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
 	);
@@ -441,6 +441,28 @@ async function executeToolCalls(
 		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit);
 	}
 	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit);
+}
+
+function getExecutableToolCalls(message: AssistantMessage): AgentToolCall[] {
+	return message.content.flatMap((block) => {
+		if (block.type === "toolCall") {
+			return [block];
+		}
+		if (block.type !== "serverToolUse" || !block.externalResult) {
+			return [];
+		}
+		const args =
+			block.input && typeof block.input === "object" && !Array.isArray(block.input)
+				? (block.input as Record<string, unknown>)
+				: { input: block.input };
+		return [{
+			type: "toolCall" as const,
+			id: block.id,
+			name: block.name,
+			arguments: args,
+			externalResult: block.externalResult,
+		}];
+	});
 }
 
 type ExecutedToolCallBatch = {
@@ -633,6 +655,21 @@ async function prepareToolCall(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
+	const externalResult = toolCall.externalResult;
+	if (externalResult) {
+		return {
+			kind: "immediate",
+			result: {
+				content:
+					externalResult.content && externalResult.content.length > 0
+						? (externalResult.content as AgentToolResult<any>["content"])
+						: [{ type: "text", text: "" }],
+				details: externalResult.details ?? {},
+			},
+			isError: externalResult.isError ?? false,
+		};
+	}
+
 	const tool = resolveAgentTool(currentContext.tools, toolCall.name);
 	if (!tool) {
 		if (isToolSearchToolName(toolCall.name)) {
@@ -653,21 +690,6 @@ async function prepareToolCall(
 			kind: "immediate",
 			result: createErrorToolResult(`Tool ${toolCall.name} not found`),
 			isError: true,
-		};
-	}
-
-	const externalResult = toolCall.externalResult;
-	if (externalResult) {
-		return {
-			kind: "immediate",
-			result: {
-				content:
-					externalResult.content && externalResult.content.length > 0
-						? (externalResult.content as AgentToolResult<any>["content"])
-						: [{ type: "text", text: "" }],
-				details: externalResult.details ?? {},
-			},
-			isError: externalResult.isError ?? false,
 		};
 	}
 

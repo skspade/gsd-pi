@@ -19,7 +19,12 @@ import {
   insertMilestone,
   _getAdapter,
 } from "../gsd-db.ts";
-import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.ts";
+import {
+  autoWorkerHeartbeatTtlSeconds,
+  autoWorkerHungHeartbeatTtlSeconds,
+  getAutoWorker,
+  registerAutoWorker,
+} from "../db/auto-workers.ts";
 import { claimMilestoneLease } from "../db/milestone-leases.ts";
 import { getLatestForUnit, markRunning, recordDispatchClaim } from "../db/unit-dispatches.ts";
 import { setRuntimeKv, getRuntimeKv } from "../db/runtime-kv.ts";
@@ -28,6 +33,7 @@ import {
   readCrashLock,
   clearLock,
   clearStaleWorkerLock,
+  isRecoverableLock,
   isLockProcessAlive,
 } from "../crash-recovery.ts";
 import { normalizeRealPath } from "../paths.ts";
@@ -46,10 +52,15 @@ function cleanup(base: string): void {
 
 /** Force a worker's last_heartbeat_at into the past so the stale-detector picks it up. */
 function expireWorker(workerId: string): void {
+  expireWorkerBySeconds(workerId, autoWorkerHungHeartbeatTtlSeconds() + 1);
+}
+
+function expireWorkerBySeconds(workerId: string, seconds: number): void {
+  const heartbeat = new Date(Date.now() - seconds * 1000).toISOString();
   const db = _getAdapter()!;
   db.prepare(
-    `UPDATE workers SET last_heartbeat_at = '1970-01-01T00:00:00.000Z' WHERE worker_id = :w`,
-  ).run({ ":w": workerId });
+    `UPDATE workers SET last_heartbeat_at = :heartbeat WHERE worker_id = :w`,
+  ).run({ ":heartbeat": heartbeat, ":w": workerId });
 }
 
 function setWorkerPid(workerId: string, pid: number): void {
@@ -75,15 +86,45 @@ test("readCrashLock returns null when only fresh (un-expired) workers exist", (t
   assert.equal(readCrashLock(base), null);
 });
 
-test("readCrashLock ignores a stale heartbeat when the worker PID is still alive", (t) => {
+test("readCrashLock ignores a briefly stale heartbeat when the worker PID is still alive", (t) => {
   const base = makeBase();
   t.after(() => cleanup(base));
   openDatabase(join(base, ".gsd", "gsd.db"));
   const projectRoot = normalizeRealPath(base);
   const workerId = registerAutoWorker({ projectRootRealpath: projectRoot });
-  expireWorker(workerId);
+  expireWorkerBySeconds(workerId, autoWorkerHeartbeatTtlSeconds() + 1);
 
   assert.equal(readCrashLock(base), null);
+});
+
+test("readCrashLock surfaces a long-silent live worker as recoverable hung state", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "T", status: "active" });
+  const projectRoot = normalizeRealPath(base);
+  const workerId = registerAutoWorker({ projectRootRealpath: projectRoot });
+  const lease = claimMilestoneLease(workerId, "M001");
+  assert.equal(lease.ok, true);
+  if (!lease.ok) return;
+  recordDispatchClaim({
+    traceId: "t1",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    unitType: "research-slice",
+    unitId: "M001/S01",
+  });
+  expireWorker(workerId);
+
+  const lock = readCrashLock(base);
+  assert.ok(lock, "long-silent live worker should surface as recoverable");
+  assert.equal(lock!.pid, process.pid);
+  assert.equal(lock!.unitType, "research-slice");
+  assert.equal(lock!.unitId, "M001/S01");
+  assert.equal(lock!.recoveryReason, "hung-worker");
+  assert.equal(isLockProcessAlive(lock!), true);
+  assert.equal(isRecoverableLock(lock!), true);
 });
 
 test("readCrashLock synthesizes LockData from a stale dead worker (no dispatches yet)", (t) => {
@@ -295,6 +336,50 @@ test("clearStaleWorkerLock marks stale worker stopping and cancels latest active
 
   assert.equal(getAutoWorker(workerId)?.status, "stopping");
   const dispatch = getLatestForUnit("M001/S01/T02");
+  assert.ok(dispatch);
+  assert.equal(dispatch!.status, "canceled");
+  assert.equal(dispatch!.exit_reason, "crash-recovered");
+  const leaseRow = _getAdapter()!.prepare(
+    `SELECT status FROM milestone_leases WHERE fencing_token = :ft`,
+  ).get({ ":ft": lease.token }) as { status: string } | undefined;
+  assert.equal(leaseRow?.status, "released");
+  assert.equal(getRuntimeKv("worker", workerId, "session_file"), null);
+  assert.equal(readCrashLock(base), null);
+});
+
+test("clearStaleWorkerLock marks hung live worker stopping and cancels latest active dispatch", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "T", status: "active" });
+  const projectRoot = normalizeRealPath(base);
+  const workerId = registerAutoWorker({ projectRootRealpath: projectRoot });
+  const lease = claimMilestoneLease(workerId, "M001");
+  assert.equal(lease.ok, true);
+  if (!lease.ok) return;
+  const claim = recordDispatchClaim({
+    traceId: "t1",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    unitType: "research-slice",
+    unitId: "M001/S01",
+  });
+  assert.equal(claim.ok, true);
+  if (!claim.ok) return;
+  markRunning(claim.dispatchId);
+  setRuntimeKv("worker", workerId, "session_file", "/tmp/pi-session-research.jsonl");
+  expireWorker(workerId);
+
+  const lock = readCrashLock(base);
+  assert.ok(lock, "hung live worker is detected before cleanup");
+  assert.equal(lock!.recoveryReason, "hung-worker");
+
+  clearStaleWorkerLock(base);
+
+  assert.equal(getAutoWorker(workerId)?.status, "stopping");
+  const dispatch = getLatestForUnit("M001/S01");
   assert.ok(dispatch);
   assert.equal(dispatch!.status, "canceled");
   assert.equal(dispatch!.exit_reason, "crash-recovered");

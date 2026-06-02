@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { verifyExpectedArtifact } from "./auto-recovery.js";
 import {
   formatCrashInfo,
+  isRecoverableLock,
   isLockProcessAlive,
   readCrashLock,
   type LockData,
@@ -145,7 +146,7 @@ export async function assessInterruptedSession(
     };
   }
 
-  if (lock && lock.pid !== process.pid && isLockProcessAlive(lock)) {
+  if (lock && lock.pid !== process.pid && isLockProcessAlive(lock) && !isRecoverableLock(lock)) {
     return {
       classification: "running",
       lock,

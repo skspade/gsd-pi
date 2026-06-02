@@ -28,7 +28,7 @@ import {
 import { readFileSync, unlinkSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
-  findStaleWorkerForProject,
+  findRecoverableWorkerForProject,
   getAllAutoWorkers,
   markWorkerStopping,
   markWorkerStoppingByPid,
@@ -51,6 +51,7 @@ export interface LockData {
   unitStartedAt: string;
   /** Path to the pi session JSONL file that was active when this unit started. */
   sessionFile?: string;
+  recoveryReason?: "dead-worker" | "hung-worker" | "legacy-lock";
 }
 
 const SESSION_FILE_KV_KEY = "session_file";
@@ -128,7 +129,12 @@ function latestInFlightRuntimeRecord(basePath: string): AutoUnitRuntimeRecord | 
   })[0] ?? null;
 }
 
-function runtimeRecordToLockData(worker: AutoWorkerRow, record: AutoUnitRuntimeRecord, sessionFile?: string): LockData {
+function runtimeRecordToLockData(
+  worker: AutoWorkerRow,
+  record: AutoUnitRuntimeRecord,
+  sessionFile?: string,
+  recoveryReason?: LockData["recoveryReason"],
+): LockData {
   const startedAt = Number.isFinite(record.startedAt)
     ? new Date(record.startedAt).toISOString()
     : worker.started_at;
@@ -139,16 +145,23 @@ function runtimeRecordToLockData(worker: AutoWorkerRow, record: AutoUnitRuntimeR
     unitId: record.unitId,
     unitStartedAt: startedAt,
     sessionFile,
+    recoveryReason,
   };
 }
 
-function workerToLockData(basePath: string, worker: AutoWorkerRow): LockData {
+function workerToLockData(
+  basePath: string,
+  worker: AutoWorkerRow,
+  recoveryReason: LockData["recoveryReason"] = "dead-worker",
+): LockData {
   const dispatch = getLatestDispatchForWorker(worker.worker_id);
   const sessionFile =
     getRuntimeKv<string>("worker", worker.worker_id, SESSION_FILE_KV_KEY) ?? undefined;
   if (!dispatch) {
     const runtimeRecord = latestInFlightRuntimeRecord(basePath);
-    if (runtimeRecord) return runtimeRecordToLockData(worker, runtimeRecord, sessionFile);
+    if (runtimeRecord) {
+      return runtimeRecordToLockData(worker, runtimeRecord, sessionFile, recoveryReason);
+    }
   }
   return {
     pid: worker.pid,
@@ -160,6 +173,7 @@ function workerToLockData(basePath: string, worker: AutoWorkerRow): LockData {
     unitId: dispatch?.unit_id ?? "bootstrap",
     unitStartedAt: dispatch?.started_at ?? worker.started_at,
     sessionFile,
+    recoveryReason,
   };
 }
 
@@ -227,11 +241,11 @@ export function clearLock(basePath: string): void {
   if (!isDbAvailable()) return;
   try {
     const projectRoot = normalizeRealPath(basePath);
-    const staleWorker = findStaleWorkerForProject(projectRoot);
-    if (staleWorker) {
-      markWorkerStopping(staleWorker.worker_id);
-      forceReleaseLeasesForWorker(staleWorker.worker_id);
-      deleteRuntimeKv("worker", staleWorker.worker_id, SESSION_FILE_KV_KEY);
+    const recoverableWorker = findRecoverableWorkerForProject(projectRoot);
+    if (recoverableWorker) {
+      markWorkerStopping(recoverableWorker.worker.worker_id);
+      forceReleaseLeasesForWorker(recoverableWorker.worker.worker_id);
+      deleteRuntimeKv("worker", recoverableWorker.worker.worker_id, SESSION_FILE_KV_KEY);
       return;
     }
     const lock = readLegacyLock(basePath);
@@ -239,10 +253,10 @@ export function clearLock(basePath: string): void {
     const worker = findActiveWorkerForCurrentProcess(projectRoot);
     if (worker) deleteRuntimeKv("worker", worker.worker_id, SESSION_FILE_KV_KEY);
 
-    const stale = findStaleWorkerForProject(projectRoot);
-    if (stale) {
-      markWorkerStopping(stale.worker_id);
-      deleteRuntimeKv("worker", stale.worker_id, SESSION_FILE_KV_KEY);
+    const recoverable = findRecoverableWorkerForProject(projectRoot);
+    if (recoverable) {
+      markWorkerStopping(recoverable.worker.worker_id);
+      deleteRuntimeKv("worker", recoverable.worker.worker_id, SESSION_FILE_KV_KEY);
     }
   } catch {
     // Best-effort.
@@ -250,9 +264,9 @@ export function clearLock(basePath: string): void {
 }
 
 /**
- * Clear a stale DB-backed worker lock after readCrashLock/findStaleWorkerForProject
- * has identified a dead worker. Unlike clearLock(), this targets the stale
- * worker row instead of the current process's active worker.
+ * Clear a recoverable DB-backed worker lock after readCrashLock has identified
+ * a dead or long-silent hung worker. Unlike clearLock(), this targets the
+ * recoverable worker row instead of the current process's active worker.
  */
 export function clearStaleWorkerLock(basePath: string): void {
   clearLegacyLockFile(basePath);
@@ -260,31 +274,33 @@ export function clearStaleWorkerLock(basePath: string): void {
   if (!isDbAvailable()) return;
   try {
     const projectRoot = normalizeRealPath(basePath);
-    const worker = findStaleWorkerForProject(projectRoot);
-    if (!worker) return;
-    markLatestActiveForWorkerCanceled(worker.worker_id, "crash-recovered");
-    markWorkerStopping(worker.worker_id);
-    forceReleaseLeasesForWorker(worker.worker_id);
-    deleteRuntimeKv("worker", worker.worker_id, SESSION_FILE_KV_KEY);
+    const recoverable = findRecoverableWorkerForProject(projectRoot);
+    if (!recoverable) return;
+    markLatestActiveForWorkerCanceled(recoverable.worker.worker_id, "crash-recovered");
+    markWorkerStopping(recoverable.worker.worker_id);
+    forceReleaseLeasesForWorker(recoverable.worker.worker_id);
+    deleteRuntimeKv("worker", recoverable.worker.worker_id, SESSION_FILE_KV_KEY);
   } catch {
     // Best-effort.
   }
 }
 
 /**
- * Detect a previous crashed auto-mode session.
+ * Detect a previous recoverable auto-mode session.
  *
  * Phase C pt 2: synthesized from workers (status='active' + lapsed
  * heartbeat) + unit_dispatches (most recent for that worker) +
- * runtime_kv (session_file). Returns null when no stale worker exists
- * or the DB is unavailable.
+ * runtime_kv (session_file). Returns null when no dead or long-silent hung
+ * worker exists or the DB is unavailable.
  */
 export function readCrashLock(basePath: string): LockData | null {
   if (isDbAvailable()) {
     try {
       const projectRoot = normalizeRealPath(basePath);
-      const stale = findStaleWorkerForProject(projectRoot);
-      if (stale) return workerToLockData(basePath, stale);
+      const recoverable = findRecoverableWorkerForProject(projectRoot);
+      if (recoverable) {
+        return workerToLockData(basePath, recoverable.worker, recoverable.reason);
+      }
     } catch {
       // Fall through to the legacy lock-file compatibility path.
     }
@@ -312,10 +328,55 @@ export function isLockProcessAlive(lock: LockData): boolean {
   }
 }
 
+export function isRecoverableLock(lock: LockData): boolean {
+  if (lock.recoveryReason === "hung-worker") return true;
+  return !isLockProcessAlive(lock);
+}
+
+export async function terminateHungLockProcess(
+  lock: LockData,
+  waitMs = 2_500,
+): Promise<{ pid: number; attempted: boolean; terminated: boolean; error?: string }> {
+  if (lock.recoveryReason !== "hung-worker") {
+    return { pid: lock.pid, attempted: false, terminated: !isLockProcessAlive(lock) };
+  }
+  if (lock.pid === process.pid) {
+    return { pid: lock.pid, attempted: false, terminated: true };
+  }
+  if (!isLockProcessAlive(lock)) {
+    return { pid: lock.pid, attempted: false, terminated: true };
+  }
+
+  try {
+    process.kill(lock.pid, "SIGTERM");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ESRCH") {
+      return { pid: lock.pid, attempted: true, terminated: true };
+    }
+    return {
+      pid: lock.pid,
+      attempted: true,
+      terminated: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    if (!isLockProcessAlive(lock)) {
+      return { pid: lock.pid, attempted: true, terminated: true };
+    }
+  }
+  return { pid: lock.pid, attempted: true, terminated: !isLockProcessAlive(lock) };
+}
+
 /** Format crash info for display or injection into a prompt. */
 export function formatCrashInfo(lock: LockData): string {
   const lines = [
-    `Previous auto-mode session was interrupted.`,
+    lock.recoveryReason === "hung-worker"
+      ? `Previous auto-mode session stopped heartbeating and appeared hung.`
+      : `Previous auto-mode session was interrupted.`,
     `  Was executing: ${lock.unitType} (${lock.unitId})`,
     `  Started at: ${lock.unitStartedAt}`,
     `  PID: ${lock.pid}`,

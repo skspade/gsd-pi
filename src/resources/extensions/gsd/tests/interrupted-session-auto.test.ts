@@ -175,6 +175,24 @@ test("direct /gsd auto stale paused-session metadata is treated as stale when no
   }
 });
 
+test("direct /gsd auto treats long-silent live worker as recoverable, not running", async () => {
+  const base = makeTmpBase();
+  try {
+    writeRoadmap(base, false);
+    writeLock(base, "research-slice", "M001/S01");
+    _getAdapter()!
+      .prepare(`UPDATE workers SET pid = :pid`)
+      .run({ ":pid": process.pid });
+
+    const assessment = await assessInterruptedSession(base);
+    assert.equal(assessment.classification, "recoverable");
+    assert.equal(assessment.lock?.recoveryReason, "hung-worker");
+    assert.equal(assessment.lock?.pid, process.pid);
+  } finally {
+    cleanup(base);
+  }
+});
+
 test("direct /gsd auto source only resumes paused-session metadata for recoverable state with real recovery signals", async () => {
   const source = await import(`node:fs/promises`).then((fs) =>
     fs.readFile(new URL("../auto.ts", import.meta.url), "utf-8")
@@ -231,7 +249,7 @@ test("interrupted-session source preserves raw lock and excludes same-pid from r
     fs.readFile(new URL("../interrupted-session.ts", import.meta.url), "utf-8")
   );
   assert.ok(source.includes('const lock = readCrashLock(basePath);'));
-  assert.ok(source.includes('if (lock && lock.pid !== process.pid && isLockProcessAlive(lock)) {'));
+  assert.ok(source.includes('if (lock && lock.pid !== process.pid && isLockProcessAlive(lock) && !isRecoverableLock(lock)) {'));
 });
 
 test("auto module imports successfully after interrupted-session changes", async () => {

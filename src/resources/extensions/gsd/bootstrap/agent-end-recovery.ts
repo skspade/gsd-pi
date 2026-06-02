@@ -8,6 +8,7 @@ import {
   checkDeepProjectSetupAfterTurn,
   checkAutoStartAfterDiscuss,
   maybeHandleReadyPhraseWithoutFiles,
+  maybeHandleAckOnlyDiscussionTurn,
   maybeHandleEmptyIntentTurn,
   resetEmptyTurnCounter,
 } from "../guided-flow.js";
@@ -457,6 +458,11 @@ export async function handleAgentEnd(
   // that and nudge the LLM to complete the writes before the user hits the
   // downstream "All milestones complete" warning loop.
   if (maybeHandleReadyPhraseWithoutFiles(event, basePath)) return;
+
+  // Structured milestone-discuss answers can reach the model, but the model
+  // may still end with only "Got it." / "Noted.". Treat that as an incomplete
+  // guided discussion turn while required artifacts are still missing.
+  if (maybeHandleAckOnlyDiscussionTurn(event, basePath)) return;
 
   // #4573 — Empty-turn recovery: if the LLM announced intent in prose but
   // emitted no tool calls, nudge it to execute. Fires only when auto-mode is

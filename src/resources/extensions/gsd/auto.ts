@@ -65,7 +65,9 @@ import {
   clearLock,
   clearStaleWorkerLock,
   readCrashLock,
+  isRecoverableLock,
   isLockProcessAlive,
+  terminateHungLockProcess,
   formatCrashInfo,
   emitCrashRecoveredUnitEnd,
   emitOpenUnitEndForUnit,
@@ -1001,6 +1003,14 @@ export function checkRemoteAutoSession(projectRoot: string): {
   // Our own PID is not a "remote" session — it is a stale lock left by this
   // process (e.g. after step-mode exit without full cleanup). (#2730)
   if (lock.pid === process.pid) return { running: false };
+
+  if (isRecoverableLock(lock)) {
+    if (!isLockProcessAlive(lock)) {
+      // Stale lock from a dead process — not a live remote session
+      clearLock(projectRoot);
+    }
+    return { running: false };
+  }
 
   if (!isLockProcessAlive(lock)) {
     // Stale lock from a dead process — not a live remote session
@@ -2872,7 +2882,17 @@ export async function startAuto(
     s.stepMode = requestedStepMode;
   }
 
-  if (freshStartAssessment.lock) {
+  if (freshStartAssessment.lock && isRecoverableLock(freshStartAssessment.lock)) {
+    if (freshStartAssessment.lock.recoveryReason === "hung-worker") {
+      const stopped = await terminateHungLockProcess(freshStartAssessment.lock);
+      if (!stopped.terminated) {
+        ctx.ui.notify(
+          `Hung auto-mode worker (PID ${freshStartAssessment.lock.pid}) did not stop after SIGTERM. Stop it with \`kill ${freshStartAssessment.lock.pid}\` and re-run /gsd auto.`,
+          "error",
+        );
+        return;
+      }
+    }
     // Emit a synthetic unit-end for any unit-start that has no closing event.
     // This closes the journal gap reported in #3348 where the worker wrote side
     // effects (SUMMARY.md, DB updates) but died before emitting unit-end.

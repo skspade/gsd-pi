@@ -696,6 +696,39 @@ describe("stream-adapter — Claude Code external tool results", () => {
 		});
 		assert.deepEqual(finalContent[1], { type: "text", text: "Read complete." });
 	});
+
+	test("buildFinalAssistantContent keeps final-turn server tool uses when result arrives without a synthetic user boundary", () => {
+		const finalContent = buildFinalAssistantContent({
+			intermediateToolBlocks: [],
+			pendingContent: [
+				{
+					type: "serverToolUse",
+					id: "tool-mcp-1",
+					name: "mcp__gsd-workflow__ask_user_questions",
+					input: { questions: [{ id: "scope_choice" }] },
+				} as any,
+				{ type: "text", text: "Answer received." },
+			],
+			toolResultsById: new Map([
+				[
+					"tool-mcp-1",
+					{
+						content: [{ type: "text", text: "{\"answers\":{}}" }],
+						details: { response: { answers: {} } },
+						isError: false,
+					},
+				],
+			]),
+		});
+
+		assert.equal(finalContent[0]?.type, "serverToolUse");
+		assert.deepEqual((finalContent[0] as any).externalResult, {
+			content: [{ type: "text", text: "{\"answers\":{}}" }],
+			details: { response: { answers: {} } },
+			isError: false,
+		});
+		assert.deepEqual(finalContent[1], { type: "text", text: "Answer received." });
+	});
 });
 
 describe("stream-adapter — session persistence (#2859)", () => {

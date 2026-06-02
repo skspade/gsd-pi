@@ -6,6 +6,8 @@
  *     "Milestone M001 ready." without writing CONTEXT.md / ROADMAP.md
  *   - maybeHandleEmptyIntentTurn: nudge when LLM narrates intent but
  *     emits no tool-use blocks
+ *   - maybeHandleAckOnlyDiscussionTurn: nudge when LLM acknowledges a
+ *     structured answer without continuing the guided discussion
  */
 
 import { describe, test, beforeEach } from "node:test";
@@ -19,6 +21,7 @@ import {
   clearPendingAutoStart,
   maybeHandleReadyPhraseWithoutFiles,
   maybeHandleEmptyIntentTurn,
+  maybeHandleAckOnlyDiscussionTurn,
   resetEmptyTurnCounter,
 } from "../guided-flow.ts";
 import { drainLogs } from "../workflow-logger.ts";
@@ -721,6 +724,40 @@ describe("#4573 maybeHandleEmptyIntentTurn", () => {
       const after = maybeHandleEmptyIntentTurn(event, false);
       assert.equal(after, true, "counter reset — nudge fires again");
       assert.equal(cap.messages.length, 1);
+    } finally {
+      clearPendingAutoStart();
+    }
+  });
+});
+
+// ─── acknowledgement-only discuss recovery ───────────────────────────────
+
+describe("maybeHandleAckOnlyDiscussionTurn", () => {
+  beforeEach(() => {
+    clearPendingAutoStart();
+    resetEmptyTurnCounter();
+  });
+
+  test("pending milestone discussion + Noted only + no files → continuation nudge", () => {
+    const base = mkBase();
+    try {
+      const cap = mkCapture();
+      setPendingAutoStart(base, {
+        basePath: base,
+        milestoneId: "M001",
+        ctx: mkCtx(cap),
+        pi: mkPi(cap),
+      });
+
+      const handled = maybeHandleAckOnlyDiscussionTurn({
+        messages: [assistantMsg("Noted.")],
+      });
+
+      assert.equal(handled, true);
+      assert.equal(cap.messages.length, 1);
+      assert.equal(cap.messages[0].payload.customType, "gsd-discuss-ack-recovery");
+      assert.equal(cap.messages[0].options.triggerTurn, true);
+      assert.match(cap.messages[0].payload.content, /Continue the M001 milestone discussion/);
     } finally {
       clearPendingAutoStart();
     }

@@ -7,7 +7,13 @@ import { milestonesDir, gsdRoot, resolveGsdRootFile, resolveMilestonePath } from
 import { deriveState, isGhostMilestone, isReusableGhostMilestone } from "./state.js";
 import { saveFile } from "./files.js";
 import { nativeIsRepo, nativeForEachRef, nativeUpdateRef } from "./native-git-bridge.js";
-import { readCrashLock, isLockProcessAlive, clearStaleWorkerLock } from "./crash-recovery.js";
+import {
+  readCrashLock,
+  isRecoverableLock,
+  isLockProcessAlive,
+  clearStaleWorkerLock,
+  terminateHungLockProcess,
+} from "./crash-recovery.js";
 import { getActiveAutoWorkers } from "./db/auto-workers.js";
 import { normalizeRealPath } from "./paths.js";
 import { ensureGitignore, isGsdGitignored } from "./gitignore.js";
@@ -61,20 +67,36 @@ export async function checkRuntimeHealth(
     const lock = readCrashLock(basePath);
     if (lock) {
       const alive = isLockProcessAlive(lock);
-      if (!alive) {
+      if (isRecoverableLock(lock)) {
         issues.push({
           severity: "error",
           code: "stale_crash_lock",
           scope: "project",
           unitId: "project",
-          message: `Stale auto-mode worker (PID ${lock.pid}, started ${lock.startedAt}, was executing ${lock.unitType} ${lock.unitId}) — process is no longer running`,
+          message: alive
+            ? `Hung auto-mode worker (PID ${lock.pid}, started ${lock.startedAt}, was executing ${lock.unitType} ${lock.unitId}) — process is still running but has not heartbeated for the hung threshold`
+            : `Stale auto-mode worker (PID ${lock.pid}, started ${lock.startedAt}, was executing ${lock.unitType} ${lock.unitId}) — process is no longer running`,
           file: "<workers table>",
           fixable: true,
         });
 
         if (shouldFix("stale_crash_lock")) {
-          clearStaleWorkerLock(basePath);
-          fixesApplied.push("cleared stale auto-mode worker state");
+          let canClear = true;
+          if (lock.recoveryReason === "hung-worker") {
+            const stopped = await terminateHungLockProcess(lock);
+            canClear = stopped.terminated;
+            if (!stopped.terminated) {
+              fixesApplied.push(`failed to stop hung auto-mode worker PID ${lock.pid}`);
+            }
+          }
+          if (canClear) {
+            clearStaleWorkerLock(basePath);
+            fixesApplied.push(
+              alive
+                ? "stopped hung auto-mode worker and cleared stale state"
+                : "cleared stale auto-mode worker state",
+            );
+          }
         }
       }
     }
@@ -225,7 +247,7 @@ export async function checkRuntimeHealth(
       // Only flag if there are actual cycle counts AND no auto-mode is running
       if (hasCycleCounts) {
         const lock = readCrashLock(basePath);
-        const autoRunning = lock ? isLockProcessAlive(lock) : false;
+        const autoRunning = lock ? isLockProcessAlive(lock) && !isRecoverableLock(lock) : false;
 
         if (!autoRunning) {
           issues.push({

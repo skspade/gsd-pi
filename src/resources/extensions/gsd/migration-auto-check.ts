@@ -30,6 +30,10 @@ export interface MigrationAutoCheckResult {
   message?: string;
 }
 
+export interface MarkdownHierarchyRecoveryResult extends Omit<MigrationAutoCheckResult, "action"> {
+  action: "none" | "recovery-required" | "recovered";
+}
+
 function zeroCounts(): HierarchyCounts {
   return { milestones: 0, slices: 0, tasks: 0 };
 }
@@ -117,5 +121,40 @@ export async function checkMarkdownHierarchyAgainstDb(
       `Markdown planning artifacts (${markdown.milestones}M/${markdown.slices}S/${markdown.tasks}T) ` +
       `do not match the authoritative DB (${beforeDb.milestones}M/${beforeDb.slices}S/${beforeDb.tasks}T). ` +
       "Runtime startup will not import markdown automatically; run `/gsd recover` if markdown should repopulate the database.",
+  };
+}
+
+/**
+ * Repair the specific safe migration state where markdown hierarchy exists
+ * but the authoritative DB hierarchy is completely empty.
+ *
+ * Count mismatches with any existing DB hierarchy stay explicit because the DB
+ * may be newer than markdown; callers should surface `/gsd recover` instead of
+ * overwriting authoritative state.
+ */
+export async function recoverMarkdownHierarchyIfDbEmpty(
+  basePath: string,
+): Promise<MarkdownHierarchyRecoveryResult> {
+  const check = await checkMarkdownHierarchyAgainstDb(basePath);
+  if (check.action !== "recovery-required" || check.reason !== "db-empty") {
+    return check;
+  }
+
+  const [{ clearEngineHierarchy, transaction }, { migrateHierarchyToDb }, { invalidateStateCache }] = await Promise.all([
+    import("./gsd-db.js"),
+    import("./md-importer.js"),
+    import("./state.js"),
+  ]);
+
+  const recovered = transaction(() => {
+    clearEngineHierarchy();
+    return migrateHierarchyToDb(basePath);
+  });
+  invalidateStateCache();
+
+  return {
+    ...check,
+    action: "recovered",
+    afterDb: recovered,
   };
 }

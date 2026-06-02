@@ -307,6 +307,87 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
+	it("should continue after externally executed server tool results", async () => {
+		const question = {
+			id: "scope_choice",
+			header: "Scope",
+			question: "Which scope should we use?",
+			options: [{ label: "Small" }, { label: "Large" }],
+		};
+		const details = {
+			questions: [question],
+			response: {
+				answers: {
+					scope_choice: { selected: "Small" },
+				},
+			},
+			cancelled: false,
+		};
+
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [],
+		};
+
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+
+		let callIndex = 0;
+		const stream = agentLoop([createUserMessage("ask a question")], context, config, undefined, () => {
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					const message = createAssistantMessage(
+						[
+							{
+								type: "serverToolUse",
+								id: "tool-ask-1",
+								name: "mcp__gsd-workflow__ask_user_questions",
+								input: { questions: [question] },
+								externalResult: {
+									content: [
+										{
+											type: "text",
+											text: JSON.stringify({ answers: { scope_choice: { answers: ["Small"] } } }),
+										},
+									],
+									details,
+									isError: false,
+								},
+							},
+						],
+						"toolUse",
+					);
+					mockStream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage([{ type: "text", text: "continuing after answer" }]);
+					mockStream.push({ type: "done", reason: "stop", message });
+				}
+				callIndex++;
+			});
+			return mockStream;
+		});
+
+		for await (const _event of stream) {
+			// consume
+		}
+
+		const messages = await stream.result();
+		expect(callIndex).toBe(2);
+		expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
+
+		const toolResult = messages.find((message) => message.role === "toolResult");
+		expect(toolResult).toBeDefined();
+		if (toolResult?.role === "toolResult") {
+			expect(toolResult.toolName).toBe("mcp__gsd-workflow__ask_user_questions");
+			expect(toolResult.isError).toBe(false);
+			expect(toolResult.details).toEqual(details);
+		}
+	});
+
 	it("should execute mutated beforeToolCall args without revalidation", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: Array<string | number> = [];

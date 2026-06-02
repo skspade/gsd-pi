@@ -16,6 +16,7 @@ import {
 import {
   checkMarkdownHierarchyAgainstDb,
   countMarkdownHierarchy,
+  recoverMarkdownHierarchyIfDbEmpty,
 } from "../migration-auto-check.ts";
 import { writeGSDDirectory } from "../migrate/writer.ts";
 import type { GSDProject } from "../migrate/types.ts";
@@ -109,6 +110,44 @@ test("migration auto-check preserves DB on hierarchy count mismatch", async () =
     assert.deepEqual(result.beforeDb, { milestones: 1, slices: 1, tasks: 0 });
     assert.deepEqual(result.afterDb, { milestones: 1, slices: 1, tasks: 0 });
     assert.equal(result.recoveryCommand, "/gsd recover");
+    assert.equal(getSliceTasks("M001", "S01").length, 0);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("recoverMarkdownHierarchyIfDbEmpty imports markdown only when DB hierarchy is empty", async () => {
+  const base = makeBase();
+  try {
+    await writeGSDDirectory(projectFixture(), base);
+    assert.equal(await ensureDbOpen(base), true);
+
+    const result = await recoverMarkdownHierarchyIfDbEmpty(base);
+
+    assert.equal(result.action, "recovered");
+    assert.equal(result.reason, "db-empty");
+    assert.deepEqual(result.afterDb, { milestones: 1, slices: 1, tasks: 1 });
+    assert.equal(getAllMilestones().length, 1);
+    assert.equal(getSliceTasks("M001", "S01").length, 1);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("recoverMarkdownHierarchyIfDbEmpty leaves count mismatches for explicit recovery", async () => {
+  const base = makeBase();
+  try {
+    await writeGSDDirectory(projectFixture(), base);
+    assert.equal(await ensureDbOpen(base), true);
+    insertMilestone({ id: "M001", title: "Legacy Milestone", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Legacy Slice", status: "pending", risk: "medium", depends: [], demo: "Legacy slice demo", sequence: 1 });
+
+    const result = await recoverMarkdownHierarchyIfDbEmpty(base);
+
+    assert.equal(result.action, "recovery-required");
+    assert.equal(result.reason, "count-mismatch");
+    assert.deepEqual(result.afterDb, { milestones: 1, slices: 1, tasks: 0 });
+    assert.equal(getAllMilestones().length, 1);
     assert.equal(getSliceTasks("M001", "S01").length, 0);
   } finally {
     cleanup(base);
