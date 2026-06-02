@@ -531,6 +531,53 @@ test('(q) verdict in ASSESSMENT file skips UAT dispatch (file-based path)', asyn
     }
 });
 
+test('(q2) project-root ASSESSMENT verdict skips UAT dispatch from live worktree', async () => {
+    const base = createFixtureBase();
+    try {
+      const worktree = join(base, '.gsd', 'worktrees', 'M001');
+      const roadmapDir = join(worktree, '.gsd', 'milestones', 'M001');
+      mkdirSync(roadmapDir, { recursive: true });
+      writeFileSync(
+        join(roadmapDir, 'M001-ROADMAP.md'),
+        [
+          '# M001: Test roadmap',
+          '',
+          '## Slices',
+          '',
+          '- [x] **S02: Completed slice** `risk:low` `depends:[]`',
+          '- [ ] **S03: Next slice** `risk:low` `depends:[S02]`',
+          '',
+          '## Boundary Map',
+          '',
+        ].join('\n'),
+      );
+
+      writeSliceFile(worktree, 'M001', 'S02', 'UAT', makeUatContent('artifact-driven'));
+      writeSliceFile(worktree, 'M001', 'S02', 'ASSESSMENT', '# UAT Assessment\n\nStill running checks...\n');
+      writeSliceFile(base, 'M001', 'S02', 'ASSESSMENT', '---\nverdict: PASS\n---\n# UAT Assessment\n');
+
+      const state = {
+        activeMilestone: { id: 'M001', title: 'Test roadmap' },
+        activeSlice: { id: 'S03', title: 'Next slice' },
+        activeTask: null,
+        phase: 'planning',
+        recentDecisions: [],
+        blockers: [],
+        nextAction: 'Plan S03',
+        registry: [],
+      } as const;
+
+      const result = await checkNeedsRunUat(worktree, 'M001', state as any, { uat_dispatch: true } as any);
+      assert.deepStrictEqual(
+        result,
+        null,
+        'project-root ASSESSMENT verdict should prevent re-dispatch when worktree projection is stale',
+      );
+    } finally {
+      cleanup(base);
+    }
+});
+
 test('(r) no ASSESSMENT file still dispatches UAT (no false skip)', async () => {
     // Guard: when there is no ASSESSMENT file at all, UAT should still dispatch
     // normally. The ASSESSMENT check must not cause a false-negative skip.

@@ -103,6 +103,7 @@
     "postinstall": "node scripts/install.js",
     "pi:install-global": "node scripts/install-pi-global.js",
     "pi:uninstall-global": "node scripts/uninstall-pi-global.js",
+    "deploy:local:mac": "node scripts/deploy-local-mac.mjs",
     "sync-pkg-version": "node scripts/sync-pkg-version.cjs",
     "sync-platform-versions": "node native/scripts/sync-platform-versions.cjs",
     "verify:native-platform-packages": "node scripts/verify-native-platform-packages.mjs",

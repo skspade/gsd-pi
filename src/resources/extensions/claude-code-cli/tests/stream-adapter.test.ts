@@ -1,5 +1,5 @@
 // gsd-pi - Claude Code stream adapter regression tests
-import { describe, test } from "node:test";
+import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -1698,20 +1698,40 @@ describe("stream-adapter — canUseTool handler", () => {
 		};
 	}
 
-	// Point process.cwd() at an empty temp dir so the real repo's
-	// .claude/settings.local.json (which may already contain rules like
-	// "Bash(gh pr list:*)") does not short-circuit the permission flow.
-	// Returns a cleanup function that restores cwd and removes the temp dir.
-	// biome-ignore lint/suspicious/noExplicitAny: test-only monkey-patch
-	function withIsolatedCwd(): () => void {
-		const dir = realpathSync(mkdtempSync(join(tmpdir(), "gsd-canusetool-")));
-		const orig = process.cwd;
-		process.cwd = () => dir;
-		return () => {
-			process.cwd = orig;
-			rmSync(dir, { recursive: true, force: true });
-		};
-	}
+		// Point process.cwd() and HOME at an empty temp dir so real project/user
+		// .claude settings do not short-circuit the permission flow.
+		// Returns a cleanup function that restores cwd and removes the temp dir.
+		// biome-ignore lint/suspicious/noExplicitAny: test-only monkey-patch
+		function withIsolatedCwd(): () => void {
+			const dir = realpathSync(mkdtempSync(join(tmpdir(), "gsd-canusetool-")));
+			const cwdDir = join(dir, "project");
+			const homeDir = join(dir, "home");
+			mkdirSync(cwdDir, { recursive: true });
+			mkdirSync(homeDir, { recursive: true });
+			const orig = process.cwd;
+			const origHome = process.env.HOME;
+			const origUserProfile = process.env.USERPROFILE;
+			process.cwd = () => cwdDir;
+			process.env.HOME = homeDir;
+			process.env.USERPROFILE = homeDir;
+			return () => {
+				process.cwd = orig;
+				if (origHome === undefined) delete process.env.HOME;
+				else process.env.HOME = origHome;
+				if (origUserProfile === undefined) delete process.env.USERPROFILE;
+				else process.env.USERPROFILE = origUserProfile;
+				rmSync(dir, { recursive: true, force: true });
+			};
+		}
+
+		let cleanupClaudeSettings: (() => void) | undefined;
+		beforeEach(() => {
+			cleanupClaudeSettings = withIsolatedCwd();
+		});
+		afterEach(() => {
+			cleanupClaudeSettings?.();
+			cleanupClaudeSettings = undefined;
+		});
 
 	test("returns undefined when no UI context is provided", () => {
 		const handler = createClaudeCodeCanUseToolHandler(undefined);
@@ -2312,8 +2332,7 @@ describe("buildBashPermissionPatternOptions", () => {
 // ---------------------------------------------------------------------------
 
 describe("bashCommandMatchesSavedRules — compound command bypass", () => {
-	let tempDir: string;
-	let originalCwd: string;
+		let tempDir: string;
 
 	// Create a temp project directory with .claude/settings.local.json
 	function setupSettings(allow: string[]): void {
@@ -2325,17 +2344,32 @@ describe("bashCommandMatchesSavedRules — compound command bypass", () => {
 		);
 	}
 
-	// biome-ignore lint/suspicious/noExplicitAny: test-only monkey-patch
-	let origCwd: any;
+		// biome-ignore lint/suspicious/noExplicitAny: test-only monkey-patch
+		let origCwd: any;
+		let origHome: string | undefined;
+		let origUserProfile: string | undefined;
 
-	// Monkey-patch process.cwd() to point at our temp dir
-	function setCwd(dir: string): void {
-		origCwd = process.cwd;
-		process.cwd = () => dir;
-	}
-	function restoreCwd(): void {
-		if (origCwd) process.cwd = origCwd;
-	}
+		// Monkey-patch process cwd/home to point at our temp dir.
+		function setCwd(dir: string): void {
+			const homeDir = join(dir, "home");
+			mkdirSync(homeDir, { recursive: true });
+			origCwd = process.cwd;
+			origHome = process.env.HOME;
+			origUserProfile = process.env.USERPROFILE;
+			process.cwd = () => dir;
+			process.env.HOME = homeDir;
+			process.env.USERPROFILE = homeDir;
+		}
+		function restoreCwd(): void {
+			if (origCwd) process.cwd = origCwd;
+			if (origHome === undefined) delete process.env.HOME;
+			else process.env.HOME = origHome;
+			if (origUserProfile === undefined) delete process.env.USERPROFILE;
+			else process.env.USERPROFILE = origUserProfile;
+			origCwd = undefined;
+			origHome = undefined;
+			origUserProfile = undefined;
+		}
 
 	test("matches cd-prefixed compound command against saved prefix rule", () => {
 		tempDir = realpathSync(mkdtempSync(join(tmpdir(), "gsd-rules-")));

@@ -29,6 +29,7 @@ import {
 import { formatConfiguredModel, toPersistedModelId } from "../commands-prefs-wizard.ts";
 import { _resetLogs, peekLogs } from "../workflow-logger.ts";
 import type { GSDPreferences, GSDModelConfigV2, GSDPhaseModelConfig } from "../preferences.ts";
+import { KNOWN_PREFERENCE_KEYS } from "../preferences-types.ts";
 
 // ── Git preferences ──────────────────────────────────────────────────────────
 
@@ -223,6 +224,72 @@ test("auto_resolve rejects invalid values and warns on unknown keys", () => {
   assert.ok(errors.some(e => e.includes("auto_resolve.write_scope")));
   assert.ok(warnings.some(w => w.includes('unknown auto_resolve key "future_mode"')));
   assert.equal(preferences.auto_resolve, undefined);
+});
+
+test("retrospective accepts valid enabled config", () => {
+  const { errors, preferences } = validatePreferences({
+    retrospective: {
+      enabled: true,
+      issue_repo: "skspade/gsd-pi",
+      issue_label: "gsd-auto-retro",
+      max_issues_per_run: 7,
+    },
+  });
+
+  assert.equal(errors.length, 0);
+  assert.deepEqual(preferences.retrospective, {
+    enabled: true,
+    issue_repo: "skspade/gsd-pi",
+    issue_label: "gsd-auto-retro",
+    max_issues_per_run: 7,
+  });
+});
+
+test("retrospective rejects upstream issue repo", () => {
+  const { errors } = validatePreferences({
+    retrospective: {
+      issue_repo: "open-gsd/gsd-pi",
+    },
+  });
+
+  assert.ok(errors.some(e => e.includes("retrospective.issue_repo must not target open-gsd/gsd-pi")));
+});
+
+test("retrospective rejects non-personal fork issue repo", () => {
+  const { errors } = validatePreferences({
+    retrospective: {
+      issue_repo: "someone/gsd-pi",
+    },
+  });
+
+  assert.ok(errors.some(e => e.includes("retrospective.issue_repo must be skspade/gsd-pi")));
+});
+
+test("retrospective rejects max_issues_per_run values that floor below one", () => {
+  const { errors, preferences } = validatePreferences({
+    retrospective: {
+      max_issues_per_run: 0.5,
+    },
+  });
+
+  assert.ok(errors.some(e => e.includes("retrospective.max_issues_per_run must be a positive number")));
+  assert.equal(preferences.retrospective, undefined);
+});
+
+test("retrospective is a recognized preference key (no warning)", () => {
+  assert.equal(KNOWN_PREFERENCE_KEYS.has("retrospective"), true);
+
+  const { warnings } = validatePreferences({
+    retrospective: {
+      enabled: false,
+    },
+  });
+
+  assert.equal(
+    warnings.filter(w => w.includes("retrospective") && w.includes("unknown preference key")).length,
+    0,
+    "retrospective must be in KNOWN_PREFERENCE_KEYS",
+  );
 });
 
 test("slice_parallel preferences validate and pass through", () => {

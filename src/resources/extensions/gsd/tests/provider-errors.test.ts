@@ -88,6 +88,13 @@ test("classifyError treats stream_exhausted_without_result as transient connecti
   assert.ok("retryAfterMs" in result && result.retryAfterMs === 15_000);
 });
 
+test("classifyError treats WebSocket close 1006 as transient connection failure", () => {
+  const result = classifyError("WebSocket closed 1006");
+  assert.ok(isTransient(result));
+  assert.equal(result.kind, "connection");
+  assert.ok("retryAfterMs" in result && result.retryAfterMs === 15_000);
+});
+
 test("classifyError detects Anthropic internal server error", () => {
   const msg = '{"type":"error","error":{"details":null,"type":"api_error","message":"Internal server error"}}';
   const result = classifyError(msg);

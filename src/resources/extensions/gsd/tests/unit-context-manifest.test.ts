@@ -118,6 +118,7 @@ test("Context Mode: every manifest declares the expected contextMode lane", () =
     "validate-milestone": "verification",
     "complete-slice": "verification",
     "complete-milestone": "verification",
+    "retrospect-milestone": "verification",
     "rewrite-docs": "docs",
   };
 

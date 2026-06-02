@@ -5,8 +5,8 @@ export {
 	INDENT,
 	STATUS_GLYPH,
 	STATUS_COLOR,
-} from "./ui.js";
-export type { ProgressStatus } from "./ui.js";
+} from "./ui-constants.js";
+export type { ProgressStatus } from "./ui-constants.js";
 
 export {
 	stripAnsi,
@@ -16,13 +16,6 @@ export {
 	normalizeStringArray,
 	fileLink,
 } from "./format-utils.js";
-
-export {
-	padRight,
-	joinColumns,
-	centerLine,
-	fitColumns,
-} from "./layout-utils.js";
 
 export { shortcutDesc } from "./terminal.js";
 export { toPosixPath } from "./path-display.js";

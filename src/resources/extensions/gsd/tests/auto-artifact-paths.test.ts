@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { resolveExpectedArtifactPath } from "../auto-artifact-paths.ts";
+import { diagnoseExpectedArtifact, resolveExpectedArtifactPath } from "../auto-artifact-paths.ts";
 import { clearPathCache, _clearGsdRootCache } from "../paths.ts";
 
 test("worktree artifact resolution falls back to project .gsd artifacts", () => {
@@ -31,6 +31,31 @@ test("worktree artifact resolution falls back to project .gsd artifacts", () => 
     assert.equal(
       resolveExpectedArtifactPath("plan-slice", "M001/S01", wtRoot),
       join(projectSliceDir, "S01-PLAN.md"),
+    );
+  } finally {
+    _clearGsdRootCache();
+    clearPathCache();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("retrospect-milestone resolves to the milestone RETRO artifact", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "gsd-auto-artifact-")));
+  try {
+    const base = root;
+    const milestoneDir = join(base, ".gsd", "milestones", "M001");
+    mkdirSync(milestoneDir, { recursive: true });
+
+    _clearGsdRootCache();
+    clearPathCache();
+
+    assert.equal(
+      resolveExpectedArtifactPath("retrospect-milestone", "M001", base),
+      join(milestoneDir, "M001-RETRO.md"),
+    );
+    assert.match(
+      diagnoseExpectedArtifact("retrospect-milestone", "M001", base) ?? "",
+      /milestone retrospective with fenced JSON findings/,
     );
   } finally {
     _clearGsdRootCache();

@@ -65,6 +65,28 @@ function isVerificationNotApplicable(value: string): boolean {
   return /^(?:none(?:[\s._\u2014-]+[\s\S]*)?|n\/?a(?:[\s._\u2014-]+[\s\S]*)?|not[\s._-]+(?:applicable|required|needed|provided)(?:[\s._\u2014-]+[\s\S]*)?|no[\s._-]+operational[\s\S]*)$/i.test(v);
 }
 
+function isExplicitlyNotApplicableVerification(value: string | null | undefined): boolean {
+  const trimmed = value?.trim() ?? "";
+  return trimmed.length > 0 && isVerificationNotApplicable(trimmed);
+}
+
+function extractUatVerificationClassText(value: string | null | undefined): string {
+  return (value ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /\bUAT\b/i.test(line))
+    .map((line) => line
+      .replace(/^\|\s*UAT\s*\|/i, "")
+      .replace(/^\s*[-*]?\s*(?:\*\*)?UAT(?:\*\*)?\s*[:|-]\s*/i, "")
+      .replace(/\|/g, " ")
+      .trim())
+    .join("\n");
+}
+
+function hasNotApplicableUatVerificationClass(value: string | null | undefined): boolean {
+  return isExplicitlyNotApplicableVerification(extractUatVerificationClassText(value));
+}
+
 function getRequiredVerificationClasses(milestoneId: string): string[] {
   const milestone = getMilestone(milestoneId);
   if (!milestone) return [];
@@ -98,6 +120,13 @@ async function browserEvidenceGateRequiresAttention(
   if (params.verdict !== "pass") return false;
 
   const milestone = getMilestone(params.milestoneId);
+  if (
+    isExplicitlyNotApplicableVerification(milestone?.verification_uat) ||
+    hasNotApplicableUatVerificationClass(params.verificationClasses)
+  ) {
+    return false;
+  }
+
   const slices = getMilestoneSlices(params.milestoneId);
   const requirementText = compactTextParts([
     milestone?.vision,

@@ -2,7 +2,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync, writeFileSync, realpathSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync, writeFileSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -753,6 +754,42 @@ test('handlePlanSlice resolves relative task IO paths against worktree roots', a
     }, worktree);
 
     assert.ok(!('error' in result), `expected success, got: ${(result as { error?: string }).error}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('handlePlanSlice accepts relative paths from a symlinked local worktree root', async (t) => {
+  const base = mkdtempSync(join(tmpdir(), 'gsd-plan-slice-symlink-'));
+  const projectRoot = join(base, 'project');
+  const externalGsd = join(base, 'external-gsd');
+  const physicalWorktree = join(externalGsd, 'worktrees', 'M001');
+  const localWorktree = join(projectRoot, '.gsd', 'worktrees', 'M001');
+
+  mkdirSync(projectRoot, { recursive: true });
+  mkdirSync(join(physicalWorktree, '.gsd'), { recursive: true });
+  mkdirSync(join(physicalWorktree, 'src', 'resources', 'extensions', 'gsd', 'tools'), { recursive: true });
+  symlinkSync(externalGsd, join(projectRoot, '.gsd'), 'junction');
+  writeFileSync(join(physicalWorktree, 'src', 'resources', 'extensions', 'gsd', 'tools', 'plan-milestone.ts'), '// fixture\n', 'utf-8');
+  writeFileSync(join(physicalWorktree, 'src', 'resources', 'extensions', 'gsd', 'tools', 'plan-task.ts'), '// fixture\n', 'utf-8');
+
+  try {
+    execFileSync('git', ['init'], { cwd: physicalWorktree, stdio: 'ignore' });
+  } catch {
+    t.skip('git is required for this worktree path regression');
+    cleanup(base);
+    return;
+  }
+
+  openDatabase(join(projectRoot, '.gsd', 'gsd.db'));
+
+  try {
+    seedParentSlice();
+    const result = await handlePlanSlice(validParams(), localWorktree);
+
+    assert.ok(!('error' in result), `expected success, got: ${(result as { error?: string }).error}`);
+    assert.equal(getSliceTasks('M001', 'S02').length, 2);
+    assert.ok(result.planPath.startsWith(realpathSync(join(localWorktree, '.gsd'))));
   } finally {
     cleanup(base);
   }

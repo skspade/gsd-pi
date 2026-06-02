@@ -30,6 +30,7 @@ import {
   hasMissingWorkspaceScopes,
   mergedFingerprint,
   reconcileMergedNodeModules,
+  resolveNodeModulesLayout,
 } from "../resource-loader.ts";
 
 // The real module captures packageRoot at load time — the merged-node-modules
@@ -161,6 +162,22 @@ test("npm global layout: internal-only @sinclair/typebox is included in merged a
   );
   assert.ok(existsSync(join(agentNodeModules, "yaml")), "hoisted yaml should resolve");
   assert.ok(existsSync(join(agentNodeModules, "@gsd")), "hoisted @gsd should resolve");
+});
+
+test("scoped global package layout resolves hoisted node_modules above the scope directory", (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-scoped-layout-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+
+  const hoisted = join(tmp, "node_modules");
+  const packageRoot = join(hoisted, "@opengsd", "gsd-pi");
+  const internal = join(packageRoot, "node_modules");
+  mkdirSync(internal, { recursive: true });
+
+  const layout = resolveNodeModulesLayout(packageRoot);
+
+  assert.equal(layout.internalNodeModules, internal);
+  assert.equal(layout.hoistedNodeModules, hoisted);
+  assert.equal(layout.isGlobalInstall, true);
 });
 
 test("pnpm layout: non-@gsd internal deps (e.g. @anthropic-ai) are included in merged dir", (t) => {

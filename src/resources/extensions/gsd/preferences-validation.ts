@@ -1188,6 +1188,74 @@ export function validatePreferences(preferences: GSDPreferences): {
     }
   }
 
+  // ─── Retrospective ─────────────────────────────────────────────────
+  if (preferences.retrospective !== undefined) {
+    if (typeof preferences.retrospective === "object" && preferences.retrospective !== null) {
+      const retro = preferences.retrospective as unknown as Record<string, unknown>;
+      const validRetro: NonNullable<GSDPreferences["retrospective"]> = {};
+
+      if (retro.enabled !== undefined) {
+        if (typeof retro.enabled === "boolean") validRetro.enabled = retro.enabled;
+        else errors.push("retrospective.enabled must be a boolean");
+      }
+
+      if (retro.issue_repo !== undefined) {
+        if (typeof retro.issue_repo === "string" && /^[^/\s]+\/[^/\s]+$/.test(retro.issue_repo.trim())) {
+          const issueRepo = retro.issue_repo.trim();
+          if (issueRepo.toLowerCase() === "open-gsd/gsd-pi") {
+            errors.push("retrospective.issue_repo must not target open-gsd/gsd-pi");
+          } else if (issueRepo !== "skspade/gsd-pi") {
+            errors.push("retrospective.issue_repo must be skspade/gsd-pi");
+          } else {
+            validRetro.issue_repo = issueRepo;
+          }
+        } else {
+          errors.push('retrospective.issue_repo must be a string in "owner/repo" format');
+        }
+      }
+
+      if (retro.issue_label !== undefined) {
+        if (typeof retro.issue_label === "string" && retro.issue_label.trim().length > 0) {
+          validRetro.issue_label = retro.issue_label.trim();
+        } else {
+          errors.push("retrospective.issue_label must be a non-empty string");
+        }
+      }
+
+      if (retro.max_issues_per_run !== undefined) {
+        const maxIssues = typeof retro.max_issues_per_run === "string"
+          ? Number(retro.max_issues_per_run.trim())
+          : retro.max_issues_per_run;
+        const flooredMaxIssues = typeof maxIssues === "number" && Number.isFinite(maxIssues)
+          ? Math.floor(maxIssues)
+          : NaN;
+        if (flooredMaxIssues > 0) {
+          validRetro.max_issues_per_run = flooredMaxIssues;
+        } else {
+          errors.push("retrospective.max_issues_per_run must be a positive number");
+        }
+      }
+
+      const knownRetrospectiveKeys = new Set([
+        "enabled",
+        "issue_repo",
+        "issue_label",
+        "max_issues_per_run",
+      ]);
+      for (const key of Object.keys(retro)) {
+        if (!knownRetrospectiveKeys.has(key)) {
+          warnings.push(`unknown retrospective key "${key}" — ignored`);
+        }
+      }
+
+      if (Object.keys(validRetro).length > 0) {
+        validated.retrospective = validRetro;
+      }
+    } else {
+      errors.push("retrospective must be an object");
+    }
+  }
+
   // ─── Show Token Cost ──────────────────────────────────────────────
   if (preferences.show_token_cost !== undefined) {
     if (typeof preferences.show_token_cost === "boolean") {

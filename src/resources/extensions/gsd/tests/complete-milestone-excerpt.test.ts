@@ -241,7 +241,7 @@ test("#4780 closer prompt: uses excerpts + lists on-demand slice SUMMARY paths",
   writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n\nBroad product context should stay on-demand.");
   writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-CONTEXT.md"), "# Context\n\nMilestone context should stay on-demand.");
 
-  const prompt = await buildCompleteMilestonePrompt("M001", "Test Milestone", base);
+  const prompt = await buildCompleteMilestonePrompt("M001", "Test Milestone", base, "standard");
 
   // Excerpt markers present for each slice
   assert.match(prompt, /### S01 Summary \(excerpt\)/);
@@ -298,7 +298,7 @@ test("complete-milestone prompt caps repeated inlined context around 20k chars",
     "# Project Knowledge\n\n## Patterns\n\n### Test Milestone shared\n" + "Large scoped knowledge body. ".repeat(1200),
   );
 
-  const prompt = await buildCompleteMilestonePrompt("M001", "Test Milestone", base);
+  const prompt = await buildCompleteMilestonePrompt("M001", "Test Milestone", base, "full");
   const contextStart = prompt.indexOf("## Inlined Context (preloaded");
   const contextEnd = prompt.indexOf("## Steps", contextStart);
   assert.ok(contextStart >= 0, "prompt should include inlined context");
@@ -337,7 +337,7 @@ test("validate-milestone prompt uses slice excerpts and on-demand paths instead 
     ].join("\n"),
   );
 
-  const prompt = await buildValidateMilestonePrompt("M001", "Test Milestone", base);
+  const prompt = await buildValidateMilestonePrompt("M001", "Test Milestone", base, "standard");
 
   assert.match(prompt, /### S01 Summary \(excerpt\)/);
   assert.match(prompt, /### S02 Summary \(excerpt\)/);

@@ -358,9 +358,7 @@ function copyDirRecursive(src: string, dest: string): void {
  */
 function ensureNodeModulesSymlink(agentDir: string): void {
   const agentNodeModules = join(agentDir, 'node_modules')
-  const internalNodeModules = join(packageRoot, 'node_modules')
-  const hoistedNodeModules = dirname(packageRoot)
-  const isGlobalInstall = basename(hoistedNodeModules) === 'node_modules'
+  const { internalNodeModules, hoistedNodeModules, isGlobalInstall } = resolveNodeModulesLayout()
 
   if (!isGlobalInstall) {
     // Source/monorepo: internal node_modules has everything
@@ -390,6 +388,26 @@ export function hasMissingWorkspaceScopes(hoisted: string, internal: string): bo
 
 function isGsdWorkspaceScope(scope: string): boolean {
   return scope === '@gsd' || scope === '@gsd-build' || scope === '@opengsd'
+}
+
+interface NodeModulesLayout {
+  internalNodeModules: string
+  hoistedNodeModules: string
+  isGlobalInstall: boolean
+}
+
+export function resolveNodeModulesLayout(root: string = packageRoot): NodeModulesLayout {
+  const internalNodeModules = join(root, 'node_modules')
+  const packageParent = dirname(root)
+  const hoistedNodeModules = basename(packageParent).startsWith('@') && basename(dirname(packageParent)) === 'node_modules'
+    ? dirname(packageParent)
+    : packageParent
+
+  return {
+    internalNodeModules,
+    hoistedNodeModules,
+    isGlobalInstall: basename(hoistedNodeModules) === 'node_modules',
+  }
 }
 
 /** Ensure a symlink at `link` points to `target`, fixing stale/wrong entries */

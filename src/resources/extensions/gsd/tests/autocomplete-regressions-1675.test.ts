@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { registerGSDCommand } from "../commands.ts";
 import { handleGSDCommand } from "../commands/dispatcher.ts";
@@ -28,6 +31,11 @@ function createMockCtx() {
       },
       custom: async () => {},
     },
+    model: undefined,
+    modelRegistry: {
+      getProviderAuthMode: () => undefined,
+    },
+    newSession: async () => ({ cancelled: true }),
     shutdown: async () => {},
   };
 }
@@ -121,6 +129,10 @@ test("bare /gsd skip shows usage and does not fall through to unknown-command wa
 });
 
 test("direct loop verbs do not fall through to unknown-command warning", async () => {
+  const originalCwd = process.cwd();
+  const originalGsdHome = process.env.GSD_HOME;
+  const isolatedRoot = mkdtempSync(join(tmpdir(), "gsd-direct-loop-"));
+  const isolatedHome = mkdtempSync(join(tmpdir(), "gsd-direct-loop-home-"));
   const loopVerbs = [
     "research-milestone",
     "research-slice",
@@ -132,12 +144,23 @@ test("direct loop verbs do not fall through to unknown-command warning", async (
     "complete-milestone",
   ];
 
-  for (const verb of loopVerbs) {
-    const ctx = createMockCtx();
-    await handleGSDCommand(verb, ctx as any, {} as any);
-    assert.ok(
-      !ctx.notifications.some((n) => n.message.startsWith(`Unknown: /gsd ${verb}`)),
-      `${verb} should be recognized as a valid /gsd command alias`,
-    );
+  try {
+    process.chdir(isolatedRoot);
+    process.env.GSD_HOME = isolatedHome;
+
+    for (const verb of loopVerbs) {
+      const ctx = createMockCtx();
+      await handleGSDCommand(verb, ctx as any, {} as any);
+      assert.ok(
+        !ctx.notifications.some((n) => n.message.startsWith(`Unknown: /gsd ${verb}`)),
+        `${verb} should be recognized as a valid /gsd command alias`,
+      );
+    }
+  } finally {
+    process.chdir(originalCwd);
+    if (originalGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = originalGsdHome;
+    rmSync(isolatedRoot, { recursive: true, force: true });
+    rmSync(isolatedHome, { recursive: true, force: true });
   }
 });

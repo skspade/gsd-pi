@@ -62,6 +62,17 @@ export type {
   SkillResolution,
   SkillResolutionReport,
 } from "./preferences-types.js";
+export type {
+  RetrospectiveOutcome,
+  RetrospectiveCategory,
+  RetrospectiveSeverity,
+  RetrospectiveConfidence,
+  RetrospectivePreferences,
+  RetrospectiveFinding,
+  RetrospectiveRunMeta,
+  RetrospectiveIssueRecord,
+  RetrospectiveIssueMap,
+} from "./retrospective-types.js";
 
 // ─── Re-exports: validation ─────────────────────────────────────────────────
 export { validatePreferences } from "./preferences-validation.js";
@@ -498,6 +509,9 @@ function mergePreferences(base: GSDPreferences, override: GSDPreferences): GSDPr
     auto_report: override.auto_report ?? base.auto_report,
     github: (base.github || override.github)
       ? { ...(base.github ?? {}), ...(override.github ?? {}) } as import("../github-sync/types.js").GitHubSyncConfig
+      : undefined,
+    retrospective: (base.retrospective || override.retrospective)
+      ? { ...(base.retrospective ?? {}), ...(override.retrospective ?? {}) }
       : undefined,
     experimental: (base.experimental || override.experimental)
       ? { ...(base.experimental ?? {}), ...(override.experimental ?? {}) }

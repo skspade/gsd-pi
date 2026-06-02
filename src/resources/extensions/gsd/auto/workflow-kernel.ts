@@ -514,6 +514,7 @@ export function decideDispatchNodeKind(
   if (sidecarKind === "hook") return "hook";
   if (sidecarKind === "triage") return "verification";
   if (sidecarKind === "doctor-heal") return "verification";
+  if (sidecarKind === "retrospective") return "verification";
   if (sidecarKind === "quick-task") return "team-worker";
 
   if (unitType.startsWith("hook/")) return "hook";

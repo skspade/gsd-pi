@@ -18,6 +18,7 @@ import {
   resolveTasksDir, resolveTaskFiles, resolveTaskFile,
   relMilestoneFile, relSliceFile, relSlicePath, relMilestonePath,
   resolveGsdRootFile, relGsdRootFile, resolveRuntimeFile,
+  gsdProjectionRoot, resolveGsdPathContract, resolveDir, resolveFile,
 } from "./paths.js";
 import { resolveSkillDiscoveryMode, resolveInlineLevel, loadEffectiveGSDPreferences, resolveAllSkillReferences } from "./preferences.js";
 import { isContextModeEnabled } from "./preferences-types.js";
@@ -46,6 +47,46 @@ import { resolveSkillManifest, warnIfManifestHasMissingSkills } from "./skill-ma
 import { classifyProject, type ProjectClassification } from "./detection.js";
 import { hasBrowserRequiredText } from "./browser-evidence.js";
 import { debugLog } from "./debug-logger.js";
+import { buildRetrospectiveContext } from "./retrospective-context.js";
+import type { RetrospectiveOutcome } from "./retrospective-types.js";
+
+function resolveSliceFileFromGsdRoot(
+  gsdRootPath: string,
+  milestoneId: string,
+  sliceId: string,
+  suffix: string,
+): string | null {
+  const milestonesRoot = join(gsdRootPath, "milestones");
+  const milestoneDir = resolveDir(milestonesRoot, milestoneId);
+  if (!milestoneDir) return null;
+  const slicesRoot = join(milestonesRoot, milestoneDir, "slices");
+  const sliceDir = resolveDir(slicesRoot, sliceId);
+  if (!sliceDir) return null;
+  const fullSliceDir = join(slicesRoot, sliceDir);
+  const file = resolveFile(fullSliceDir, sliceId, suffix);
+  return file ? join(fullSliceDir, file) : null;
+}
+
+async function sliceFileHasVerdictInAnyStateRoot(
+  base: string,
+  milestoneId: string,
+  sliceId: string,
+  suffix: string,
+): Promise<boolean> {
+  const contract = resolveGsdPathContract(base);
+  const roots = Array.from(new Set([
+    gsdProjectionRoot(base),
+    contract.projectGsd,
+  ]));
+
+  for (const root of roots) {
+    const file = resolveSliceFileFromGsdRoot(root, milestoneId, sliceId, suffix);
+    if (!file) continue;
+    const content = await loadFile(file);
+    if (content && hasVerdict(content)) return true;
+  }
+  return false;
+}
 
 // ─── Preamble Cap ─────────────────────────────────────────────────────────────
 
@@ -1710,11 +1751,7 @@ export async function checkNeedsRunUat(
           // Also check the ASSESSMENT file — the run-uat prompt writes the verdict
           // there (via gsd_summary_save artifact_type:"ASSESSMENT"), not into the
           // UAT spec file. Without this check the unit re-dispatches indefinitely.
-          const assessmentFile = resolveSliceFile(base, mid, sid, "ASSESSMENT");
-          if (assessmentFile) {
-            const assessmentContent = await loadFile(assessmentFile);
-            if (assessmentContent && hasVerdict(assessmentContent)) continue;
-          }
+          if (await sliceFileHasVerdictInAnyStateRoot(base, mid, sid, "ASSESSMENT")) continue;
           if (!shouldDispatchUatForContent(uatContent, prefs)) continue;
           return { sliceId: sid, uatType: resolveEffectiveUatType(uatContent) };
         }
@@ -1743,11 +1780,7 @@ export async function checkNeedsRunUat(
     if (hasVerdict(uatContentFb)) continue;
     // Also check the ASSESSMENT file for the file-based fallback path (same
     // reason as the DB path above — verdict lives in ASSESSMENT, not UAT).
-    const assessmentFileFb = resolveSliceFile(base, mid, uatSid, "ASSESSMENT");
-    if (assessmentFileFb) {
-      const assessmentContentFb = await loadFile(assessmentFileFb);
-      if (assessmentContentFb && hasVerdict(assessmentContentFb)) continue;
-    }
+    if (await sliceFileHasVerdictInAnyStateRoot(base, mid, uatSid, "ASSESSMENT")) continue;
     if (!shouldDispatchUatForContent(uatContentFb, prefs)) continue;
     return { sliceId: uatSid, uatType: resolveEffectiveUatType(uatContentFb) };
   }
@@ -3167,6 +3200,19 @@ export async function buildCompleteMilestonePrompt(
       extraContext: [inlinedContext],
       unitType: "complete-milestone",
     }),
+  });
+}
+
+export async function buildRetrospectMilestonePrompt(
+  mid: string,
+  base: string,
+  outcome: RetrospectiveOutcome,
+  reason?: string,
+): Promise<string> {
+  const retrospectiveContext = await buildRetrospectiveContext(mid, base, outcome, reason);
+  return loadPrompt("retrospect-milestone", {
+    milestoneId: mid,
+    retrospectiveContext,
   });
 }
 
