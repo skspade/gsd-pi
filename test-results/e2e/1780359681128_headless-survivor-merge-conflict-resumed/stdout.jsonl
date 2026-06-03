@@ -1,0 +1,14 @@
+{"type":"extension_ui_request","id":"7086af8c-8f2a-4827-9974-4138c6344943","method":"setStatus","statusKey":"zz-notifications"}
+{"type":"extension_ui_request","id":"1d780093-a6a1-45be-9946-38fbae9d4f85","method":"setWidget","widgetKey":"gsd-health","widgetLines":["  ✗ 1 issue  │  Env: 1 error  │  Last commit: just now — merge: manually resolve milestone M001"],"widgetPlacement":"belowEditor"}
+{"type":"extension_ui_request","id":"c17e365b-557a-4d25-8c70-8c827eb8bca7","method":"setWidget","widgetKey":"gsd-health","widgetPlacement":"belowEditor"}
+{"type":"extension_ui_request","id":"3221c99c-be66-44b2-8248-467a871fed6c","method":"setStatus","statusKey":"gsd-fast"}
+{"type":"extension_ui_request","id":"a606d567-7cc1-4dd4-8325-04f8a64de99d","method":"setStatus","statusKey":"ollama"}
+{"type":"extension_ui_request","id":"0fd50a51-d984-4f23-9eab-114b4ee5625f","method":"setWidget","widgetKey":"gsd-outcome"}
+{"type":"extension_ui_request","id":"849e9abc-813c-4ec8-9fdd-f373b46a7133","method":"setWidget","widgetKey":"gsd-progress"}
+{"type":"extension_ui_request","id":"ca6aec5d-c5e8-411a-aca6-c08c52cb12ce","method":"setWidget","widgetKey":"gsd-health"}
+{"type":"extension_ui_request","id":"d2d37466-2b2b-4e13-a558-186014e019e6","method":"setStatus","statusKey":"gsd-step"}
+{"type":"extension_ui_request","id":"ef223335-bf14-45cc-9216-7627312f3674","method":"setStatus","statusKey":"gsd-auto"}
+{"type":"extension_ui_request","id":"890285d4-a625-4803-af6a-153c6e10a021","method":"setStatus","statusKey":"zz-notifications","statusText":"🔔 1 unread (⌃⌥N / ⌃⇧N)"}
+{"type":"extension_ui_request","id":"62f5032b-2f80-46c1-9126-4920beb046bd","method":"notify","message":"Orphan audit: Deleted merged branch milestone/M001 for completed milestone M001.","notifyType":"info"}
+{"type":"extension_ui_request","id":"ca5afbdd-0511-462b-9d51-e4d0eb47d510","method":"setStatus","statusKey":"zz-notifications","statusText":"🔔 2 unread (⌃⌥N / ⌃⇧N)"}
+{"type":"extension_ui_request","id":"cd1c2282-ea3c-486c-a8d9-7849350a5668","method":"notify","message":"Auto-mode stopped (Recovered completed milestone cleanup; all milestones complete).","notifyType":"info"}

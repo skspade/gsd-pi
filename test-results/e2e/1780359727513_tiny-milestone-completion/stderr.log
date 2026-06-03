@@ -1,0 +1,17 @@
+
+[36m  ██████╗ ███████╗██████╗ ─ ██████╗ ██╗[0m
+[36m ██╔════╝ ██╔════╝██╔══██╗ ██╔══██╗██║[0m
+[36m ██║  ███╗███████╗██║  ██║ ██████╔╝██║[0m
+[36m ██║   ██║╚════██║██║  ██║ ██╔═══╝ ██║[0m
+[36m ╚██████╔╝███████║██████╔╝ ██║     ██║[0m
+[36m  ╚═════╝ ╚══════╝╚═════╝  ╚═╝     ╚═╝[0m
+
+  [1mGSD-Pi[0m [2mGit Ship Done · v1.0.2[0m
+  [2mhttps://opengsd.net[0m
+  [32mWelcome.[0m Setting up your environment...
+
+[headless] signal-handlers-ready
+[headless] Status: complete
+[headless] Duration: 7.2s
+[headless] Events: 364 total, 14 tool calls
+[headless] Answers: 1 answered, 0 defaulted, 0 secrets

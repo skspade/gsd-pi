@@ -1,0 +1,12 @@
+{"type":"extension_ui_request","id":"f9a47fb3-14b5-48ac-9ebd-b4544c92df38","method":"setStatus","statusKey":"zz-notifications"}
+{"type":"extension_ui_request","id":"1ae8099e-d222-4f58-a1cb-a2136792bcdd","method":"setWidget","widgetKey":"gsd-health","widgetLines":["  ✗ 1 issue  │  Env: 1 error  │  Last commit: just now — feat: main conflict"],"widgetPlacement":"belowEditor"}
+{"type":"extension_ui_request","id":"12dd92de-e7f3-4145-8102-d0e29e2acb26","method":"setWidget","widgetKey":"gsd-health","widgetPlacement":"belowEditor"}
+{"type":"extension_ui_request","id":"eb41ad9f-2e70-41bf-8d12-a22b48ee5b6d","method":"setStatus","statusKey":"gsd-fast"}
+{"type":"extension_ui_request","id":"9af8b1b4-ad2c-4349-acf0-5e341355867c","method":"setStatus","statusKey":"ollama"}
+{"type":"extension_ui_request","id":"6881fa0c-701d-4e5e-a3a4-81fd69e007d1","method":"setWidget","widgetKey":"gsd-outcome"}
+{"type":"extension_ui_request","id":"d72b54c7-3bb6-446d-93d4-d23255c20928","method":"setWidget","widgetKey":"gsd-progress"}
+{"type":"extension_ui_request","id":"775a9bd9-206f-4930-9af5-c06ca94e56fb","method":"setWidget","widgetKey":"gsd-health"}
+{"type":"extension_ui_request","id":"699836fc-0b0b-4aa8-9dd9-5a4d838bbbcc","method":"setStatus","statusKey":"gsd-step"}
+{"type":"extension_ui_request","id":"40fce4d5-f98f-4b0b-9516-81133ae65413","method":"setStatus","statusKey":"gsd-auto"}
+{"type":"message_start","message":{"role":"custom","customType":"gsd-command-block","content":"/gsd auto cannot start new workflow work because M001 is complete but not merged.\n\nBranch: milestone/M001\nTarget: main\nUnmerged product files:\n  - src/conflict.js\n\nFix:\n  1. Review the unmerged milestone branch.\n  2. Run /gsd dispatch complete-milestone M001 to complete the preserved milestone merge.\n  3. After M001 is merged, run /gsd again.","display":true,"timestamp":1780359677027},"runId":"387bccfe-5b4f-4a80-9ebb-16ecec7b2e2a"}
+{"type":"message_end","message":{"role":"custom","customType":"gsd-command-block","content":"/gsd auto cannot start new workflow work because M001 is complete but not merged.\n\nBranch: milestone/M001\nTarget: main\nUnmerged product files:\n  - src/conflict.js\n\nFix:\n  1. Review the unmerged milestone branch.\n  2. Run /gsd dispatch complete-milestone M001 to complete the preserved milestone merge.\n  3. After M001 is merged, run /gsd again.","display":true,"timestamp":1780359677027},"runId":"387bccfe-5b4f-4a80-9ebb-16ecec7b2e2a"}

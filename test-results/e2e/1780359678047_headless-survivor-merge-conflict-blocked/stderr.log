@@ -1,0 +1,11 @@
+[headless] signal-handlers-ready
+[headless] Status: blocked
+[headless] Duration: 2.3s
+[headless] Events: 13 total, 0 tool calls
+[headless] Event filter: extension_ui_request, message_start, message_end, agent_end
+[headless] Last events:
+  extension_ui_request: setWidget: 
+  extension_ui_request: setStatus: 
+  extension_ui_request: setStatus: 
+  message_start
+  message_end

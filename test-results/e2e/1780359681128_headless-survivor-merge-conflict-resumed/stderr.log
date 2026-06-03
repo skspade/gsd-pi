@@ -1,0 +1,5 @@
+[headless] signal-handlers-ready
+[headless] Status: complete
+[headless] Duration: 2.5s
+[headless] Events: 15 total, 0 tool calls
+[headless] Event filter: extension_ui_request, agent_end

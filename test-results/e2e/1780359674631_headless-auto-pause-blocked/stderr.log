@@ -1,0 +1,11 @@
+[headless] signal-handlers-ready
+[headless] Status: blocked
+[headless] Duration: 2.2s
+[headless] Events: 42 total, 0 tool calls
+[headless] Event filter: extension_ui_request, message_start, message_end, agent_end
+[headless] Last events:
+  cost_update
+  message_end
+  turn_end
+  extension_ui_request: setStatus: 
+  extension_ui_request: notify: Auto-mode paused due to provider error: invalid api key
