@@ -439,10 +439,12 @@ export function buildCategorySummaries(prefs: Record<string, unknown>): Record<s
   // Advanced
   const uniqueIds = prefs.unique_milestone_ids;
   const experimentalRtk = (prefs.experimental as Record<string, unknown> | undefined)?.rtk;
+  const autoResolve = prefs.auto_resolve as Record<string, unknown> | undefined;
   let advancedSummary = "(defaults)";
   {
     const parts: string[] = [];
     if (uniqueIds !== undefined) parts.push(`unique: ${uniqueIds ? "on" : "off"}`);
+    if (autoResolve && Object.keys(autoResolve).length > 0) parts.push(`auto-resolve: ${autoResolve.enabled === false ? "off" : "on"}`);
     if (prefs.auto_visualize !== undefined) parts.push(`viz: ${prefs.auto_visualize ? "on" : "off"}`);
     if (prefs.auto_report !== undefined) parts.push(`report: ${prefs.auto_report ? "on" : "off"}`);
     if (prefs.show_token_cost) parts.push("cost-display");
@@ -1752,7 +1754,7 @@ export function serializePreferencesToFrontmatter(prefs: Record<string, unknown>
   const orderedKeys = [
     "version", "mode", "always_use_skills", "prefer_skills", "avoid_skills",
     "skill_rules", "custom_instructions", "models", "skill_discovery",
-    "skill_staleness_days", "auto_supervisor", "uat_dispatch", "unique_milestone_ids",
+    "skill_staleness_days", "auto_supervisor", "auto_resolve", "uat_dispatch", "unique_milestone_ids",
     "budget_ceiling", "budget_enforcement", "context_pause_threshold",
     "notifications", "cmux", "remote_questions", "git",
     "stale_commit_threshold_minutes",

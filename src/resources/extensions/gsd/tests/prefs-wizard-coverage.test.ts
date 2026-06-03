@@ -21,6 +21,13 @@ const PREF_SAMPLE_VALUES: Record<string, unknown> = {
   skill_discovery: "auto",
   skill_staleness_days: 7,
   auto_supervisor: { soft_timeout_minutes: 20, idle_timeout_minutes: 10, hard_timeout_minutes: 30 },
+  auto_resolve: {
+    enabled: true,
+    max_attempts_per_gate: 2,
+    write_scope: "state-and-config",
+    include_provider: true,
+    include_budget_context: false,
+  },
   uat_dispatch: true,
   unique_milestone_ids: true,
   budget_ceiling: 12.5,
