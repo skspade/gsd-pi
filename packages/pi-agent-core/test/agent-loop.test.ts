@@ -307,6 +307,73 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
+	it("should treat non-throwing tool results with isError true as failed", async () => {
+		const toolSchema = Type.Object({});
+		const tool: AgentTool<typeof toolSchema, { exit_code: number }> = {
+			name: "gsd_exec",
+			label: "Exec (Sandboxed)",
+			description: "Run a command",
+			parameters: toolSchema,
+			async execute() {
+				return {
+					content: [{ type: "text", text: "gsd_exec[run-1] runtime=bash exit=101" }],
+					details: { exit_code: 101 },
+					isError: true,
+				};
+			},
+		};
+
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					stream.push({
+						type: "done",
+						reason: "toolUse",
+						message: createAssistantMessage(
+							[{ type: "toolCall", id: "tool-1", name: "gsd_exec", arguments: {} }],
+							"toolUse",
+						),
+					});
+				} else {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage([{ type: "text", text: "done" }]) });
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("run check")], context, config, undefined, streamFn)) {
+			events.push(event);
+		}
+
+		const toolEnd = events.find(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> =>
+				event.type === "tool_execution_end" && event.toolCallId === "tool-1",
+		);
+		expect(toolEnd?.isError).toBe(true);
+
+		const toolResultEnd = events.find(
+			(event): event is Extract<AgentEvent, { type: "message_end" }> =>
+				event.type === "message_end"
+				&& event.message.role === "toolResult"
+				&& event.message.toolCallId === "tool-1",
+		);
+		expect(toolResultEnd?.message.isError).toBe(true);
+	});
+
 	it("should continue after externally executed server tool results", async () => {
 		const question = {
 			id: "scope_choice",
