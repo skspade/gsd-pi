@@ -64,7 +64,7 @@ const NETWORK_RE = /network|ECONNRESET|ETIMEDOUT|ECONNREFUSED|socket hang up|web
 // See: https://github.com/open-gsd/gsd-pi/issues/4528
 const SERVER_RE = /internal(?: server)?[ _-]?error|server[ _-]?error|500|502|503|overloaded|server_error|api_error|service.?unavailable|context (?:window|length) exceed|context window exceed/i;
 // ECONNRESET/ECONNREFUSED are in NETWORK_RE (same-model retry first).
-const CONNECTION_RE = /terminated|connection.?(?:refused|error)|other side closed|websocket closed|EPIPE|network.?(?:is\s+)?unavailable|stream_exhausted(?:_without_result)?/i;
+const CONNECTION_RE = /\bterminated\b|connection.?(?:refused|error)|other side closed|websocket closed|EPIPE|network.?(?:is\s+)?unavailable|stream_exhausted(?:_without_result)?/i;
 // Catch-all for V8 JSON.parse errors: all modern variants end with "in JSON at position \d+".
 // This eliminates the need to enumerate every error message variant individually.
 const STREAM_RE = /in JSON at position \d+|Unexpected end of JSON|SyntaxError.*JSON/i;
@@ -94,10 +94,11 @@ const UNSUPPORTED_MODEL_SCOPE_RE = /\b(?:account|plan|tier|subscription)\b/i;
  * Classification order:
  *  1. Permanent (auth/billing/quota) — unless also rate-limited
  *  2. Rate limit (429, rate.?limit, too many requests, hit-your-limit/quota-window phrasing)
- *  3. Network (ECONNRESET, ETIMEDOUT, socket hang up, fetch failed, dns)
+ *  3. Specific connection-close events (WebSocket close)
  *  4. Stream truncation (malformed JSON from mid-stream cut)
  *  5. Server (500/502/503, overloaded, server_error)
- *  6. Connection (terminated, ECONNREFUSED, EPIPE, other side closed)
+ *  6. Network (ECONNRESET, ETIMEDOUT, socket hang up, fetch failed, dns)
+ *  7. Connection (terminated, EPIPE, other side closed)
  *  7. Model error (400 invalid argument / payload rejected for this model)
  *  8. Unknown
  */
@@ -139,35 +140,38 @@ export function classifyError(errorMsg: string, retryAfterMs?: number): ErrorCla
     return { kind: "rate-limit", retryAfterMs: delayMs };
   }
 
-  // 3. Network errors — same-model retry candidate
+  // 3. Specific connection-close events — checked before NETWORK_RE so
+  // "WebSocket closed 1006" is not swallowed by the broader transport pattern.
+  if (/web ?socket closed/i.test(errorMsg)) {
+    return { kind: "connection", retryAfterMs: retryAfterMs ?? 15_000 };
+  }
+
+  // 4. Network errors — same-model retry candidate
   if (NETWORK_RE.test(errorMsg)) {
-    // Exclude if also matches permanent signals (already handled above for
-    // rate-limit, but double-check for non-rate-limit permanent overlap like
-    // "billing" appearing alongside "network").
     return { kind: "network", retryAfterMs: retryAfterMs ?? 3_000 };
   }
 
-  // 4. Stream truncation — downstream symptom of connection drop
+  // 5. Stream truncation — downstream symptom of connection drop
   if (STREAM_RE.test(errorMsg)) {
     return { kind: "stream", retryAfterMs: retryAfterMs ?? 15_000 };
   }
 
-  // 5. Server errors — try fallback model
+  // 6. Server errors — try fallback model
   if (SERVER_RE.test(errorMsg)) {
     return { kind: "server", retryAfterMs: retryAfterMs ?? 30_000 };
   }
 
-  // 6. Connection errors — try fallback model
+  // 7. Connection errors — try fallback model
   if (CONNECTION_RE.test(errorMsg)) {
     return { kind: "connection", retryAfterMs: retryAfterMs ?? 15_000 };
   }
 
-  // 7. Model/payload errors — wrong model or incompatible request for provider
+  // 8. Model/payload errors — wrong model or incompatible request for provider
   if (MODEL_ERROR_RE.test(errorMsg)) {
     return { kind: "model-error" };
   }
 
-  // 8. Unknown
+  // 9. Unknown
   return { kind: "unknown" };
 }
 
