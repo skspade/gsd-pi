@@ -33,6 +33,10 @@ function hasRequiredExtensionAssets(rootDir: string, exists: ExistsFn = existsSy
   );
 }
 
+function isSourceExtensionDir(rootDir: string, exists: ExistsFn = existsSync): boolean {
+  return exists(join(rootDir, "prompt-loader.ts")) || exists(join(rootDir, "auto-prompts.ts"));
+}
+
 export function resolveExtensionDirFromCandidates(
   moduleDir: string,
   agentGsdDir: string,
@@ -41,8 +45,14 @@ export function resolveExtensionDirFromCandidates(
   const moduleUsable = hasRequiredExtensionAssets(moduleDir, exists);
   const agentUsable = hasRequiredExtensionAssets(agentGsdDir, exists);
 
-  // Prefer the user-local extension tree when both are valid. This avoids
-  // leaking npm/global-install paths into prompts on Windows.
+  // Source-dev and test runs must use the prompt tree that matches the code
+  // currently executing; the user-local agent copy may be stale from a prior
+  // install or initResources() run.
+  if (moduleUsable && isSourceExtensionDir(moduleDir, exists)) return moduleDir;
+
+  // Prefer the user-local extension tree for packaged/global installs when
+  // both are valid. This avoids leaking npm/global-install paths into prompts
+  // on Windows.
   if (agentUsable) return agentGsdDir;
   if (moduleUsable) return moduleDir;
 

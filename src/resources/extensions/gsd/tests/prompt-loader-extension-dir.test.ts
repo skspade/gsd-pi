@@ -22,6 +22,21 @@ test("resolveExtensionDirFromCandidates prefers user-local dir when both trees a
   assert.equal(resolved, agentDir);
 });
 
+test("resolveExtensionDirFromCandidates prefers source dir over stale user-local dir", () => {
+  const moduleDir = "/repo/src/resources/extensions/gsd";
+  const agentDir = "/home/user/.gsd/agent/extensions/gsd";
+  const paths = new Set<string>([
+    join(moduleDir, "prompts"),
+    join(moduleDir, "templates", "task-summary.md"),
+    join(moduleDir, "prompt-loader.ts"),
+    join(agentDir, "prompts"),
+    join(agentDir, "templates", "task-summary.md"),
+  ]);
+
+  const resolved = resolveExtensionDirFromCandidates(moduleDir, agentDir, makeExists(paths));
+  assert.equal(resolved, moduleDir);
+});
+
 test("resolveExtensionDirFromCandidates rejects module dir missing task-summary template", () => {
   const moduleDir = "/npm/global/gsd";
   const agentDir = "/home/user/.gsd/agent/extensions/gsd";
