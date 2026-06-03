@@ -23,6 +23,7 @@ test("complete dist/resources is selected when expected roots exist", () => {
   const existing = new Set([
     join(pkg, "dist", "resources", "agents"),
     join(pkg, "dist", "resources", "extensions"),
+    join(pkg, "dist", "resources", "shared", "package-manager-detection.js"),
   ]);
 
   const result = resolveBundledResourcesDirFromPackageRoot(pkg, (p) => existing.has(p));

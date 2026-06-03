@@ -14,7 +14,8 @@ export function hasCompleteBundledResources(
   fileExists: FileExists = existsSync,
 ): boolean {
   return fileExists(join(resourcesDir, "agents")) &&
-    fileExists(join(resourcesDir, "extensions"));
+    fileExists(join(resourcesDir, "extensions")) &&
+    fileExists(join(resourcesDir, "shared", "package-manager-detection.js"));
 }
 
 export function resolveBundledResourcesDirFromPackageRoot(

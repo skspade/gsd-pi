@@ -1,10 +1,29 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 
-const projectRoot = process.cwd()
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+
+function readWorkspaceRootPackage(): { packageJson: Record<string, any>; sourcePath: string } {
+  const packagePath = join(projectRoot, 'package.json')
+  const packageJson = JSON.parse(readFileSync(packagePath, 'utf-8'))
+  if (packageJson.scripts?.['stage:web-host'] !== undefined) {
+    return { packageJson, sourcePath: packagePath }
+  }
+
+  const prepackBackupPath = join(projectRoot, '.prepack-backup', 'package.json')
+  if (existsSync(prepackBackupPath)) {
+    return {
+      packageJson: JSON.parse(readFileSync(prepackBackupPath, 'utf-8')),
+      sourcePath: prepackBackupPath,
+    }
+  }
+
+  return { packageJson, sourcePath: packagePath }
+}
 
 const cliWeb = await import('../../cli-web-branch.ts')
 const webMode = await import('../../web-mode.ts')
@@ -17,8 +36,13 @@ test('parseCliArgs recognizes --web explicitly', () => {
 })
 
 test('package hooks declare a concrete staged web host', () => {
-  const rootPackage = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf-8'))
-  assert.equal(rootPackage.scripts['stage:web-host'], 'node scripts/stage-web-standalone.cjs')
+  const { packageJson: rootPackage, sourcePath: rootPackagePath } = readWorkspaceRootPackage()
+  const scriptKeys = Object.keys(rootPackage.scripts ?? {}).join(', ')
+  assert.equal(
+    rootPackage.scripts['stage:web-host'],
+    'node scripts/stage-web-standalone.cjs',
+    `stage:web-host from ${rootPackagePath}; script keys: ${scriptKeys}`,
+  )
   assert.equal(rootPackage.scripts['build:web-host'], 'cross-env NODE_ENV=production pnpm --filter gsd-web run build && pnpm run stage:web-host')
   assert.equal(rootPackage.scripts['gsd'], 'node scripts/dev-cli.js')
   assert.equal(rootPackage.scripts['gsd:web'], 'pnpm run build:contracts && pnpm run build:pi && pnpm run copy-resources && node scripts/build-web-if-stale.cjs && node scripts/dev-cli.js --web')
