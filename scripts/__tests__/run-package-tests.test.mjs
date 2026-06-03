@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { selectPackageTestFiles } = require('../run-package-tests.cjs');
+const { buildNodeTestArgs, selectPackageTestFiles } = require('../run-package-tests.cjs');
 
 function withTempPackage(callback) {
   const root = mkdtempSync(join(tmpdir(), 'gsd-run-package-tests-'));
@@ -71,4 +71,11 @@ test('selectPackageTestFiles falls back to package-local dist when test:compile 
 
     assert.deepEqual(selectPackageTestFiles(distTestPkg, pkgDist), [packageDistTest]);
   });
+});
+
+test('buildNodeTestArgs loads the dist-test resolver before package tests', () => {
+  const args = buildNodeTestArgs(['dist-test/packages/mcp-server/src/workflow-tools.test.js']);
+
+  assert.deepEqual(args.slice(0, 3), ['--import', './scripts/dist-test-resolve.mjs', '--test']);
+  assert.equal(args[3], 'dist-test/packages/mcp-server/src/workflow-tools.test.js');
 });

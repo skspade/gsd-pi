@@ -37,6 +37,7 @@ const WORKSPACE_ENTRIES = {
   'pi-tui':          new URL('../dist-test/packages/pi-tui/src/index.js', import.meta.url).href,
   'native':          new URL('../dist-test/packages/native/dist/index.js', import.meta.url).href,
   'agent-core':      new URL('../dist-test/packages/gsd-agent-core/dist/index.js', import.meta.url).href,
+  'contracts':       new URL('../dist-test/packages/contracts/src/index.js', import.meta.url).href,
 };
 
 const WORKSPACE_SCOPES = ['@gsd', '@earendil-works', '@mariozechner'];
@@ -49,6 +50,7 @@ const BUILT_PACKAGE_ENTRIES = {
   'pi-tui':          new URL('../packages/pi-tui/dist/index.js', import.meta.url).href,
   'native':          new URL('../packages/native/dist/index.js', import.meta.url).href,
   'agent-core':      new URL('../packages/gsd-agent-core/dist/index.js', import.meta.url).href,
+  'contracts':       new URL('../packages/contracts/dist/index.js', import.meta.url).href,
 };
 
 const GSD_ALIASES = Object.fromEntries(
@@ -135,6 +137,9 @@ function resolveFromSourcePackage(parentURL, specifier) {
 
 function resolveWorkspaceSubpath(specifier, context) {
   const useBuilt = shouldUseBuiltPackageDist(context);
+  if (specifier === '@opengsd/contracts') {
+    return workspaceEntry('contracts', context);
+  }
   for (const scope of WORKSPACE_SCOPES) {
     if (specifier === `${scope}/pi-coding-agent`) {
       return workspaceEntry('pi-coding-agent', context);
@@ -226,14 +231,14 @@ export function resolve(specifier, context, nextResolve) {
     return forwardResolve(malformedTarget, context, nextResolve);
   }
 
-  const sourcePackageTarget = resolveFromSourcePackage(context.parentURL, specifier);
-  if (sourcePackageTarget) {
-    return forwardResolve(sourcePackageTarget, context, nextResolve);
-  }
-
   const subpathTarget = resolveWorkspaceSubpath(specifier, context);
   if (subpathTarget) {
     return forwardResolve(subpathTarget, context, nextResolve);
+  }
+
+  const sourcePackageTarget = resolveFromSourcePackage(context.parentURL, specifier);
+  if (sourcePackageTarget) {
+    return forwardResolve(sourcePackageTarget, context, nextResolve);
   }
 
   const entrySubpathTarget = resolvePackageEntrySubpath(context.parentURL, specifier);

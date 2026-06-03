@@ -33,6 +33,10 @@ function selectPackageTestFiles(distTestPkg, pkgDist) {
 	return findTestFiles(pkgDist)
 }
 
+function buildNodeTestArgs(files) {
+	return ['--import', './scripts/dist-test-resolve.mjs', '--test', ...files]
+}
+
 function findDistTestFiles(pkgDir) {
 	const distTestPkg = join(REPO_ROOT, 'dist-test', 'packages', relative(join(REPO_ROOT, 'packages'), pkgDir))
 	return selectPackageTestFiles(distTestPkg, join(pkgDir, 'dist'))
@@ -177,11 +181,11 @@ function main() {
 			continue
 		}
 
-		process.stderr.write(`\nRunning ${pkg.packageName} package tests...\n`)
-		if (runCommand(process.execPath, ['--test', ...files], REPO_ROOT, pkg.packageName) !== 0) {
-			failureCount += 1
+			process.stderr.write(`\nRunning ${pkg.packageName} package tests...\n`)
+			if (runCommand(process.execPath, buildNodeTestArgs(files), REPO_ROOT, pkg.packageName) !== 0) {
+				failureCount += 1
+			}
 		}
-	}
 
 	return failureCount === 0 ? 0 : 1
 }
@@ -194,4 +198,5 @@ module.exports = {
 	findTestFiles,
 	selectPackageTestFiles,
 	findDistTestFiles,
+	buildNodeTestArgs,
 }
