@@ -13,6 +13,7 @@ import type { Message } from "@gsd/pi-ai";
 import type { GSDPreferences } from "./preferences.js";
 import type { AutoResolvePreferences } from "./preferences-types.js";
 import { getRuntimeKv, setRuntimeKv } from "./db/runtime-kv.js";
+import { logWarning } from "./workflow-logger.js";
 import { discoverAgents, type AgentConfig } from "../subagent/agents.js";
 import { createSubagentLaunchPlan } from "../subagent/launch.js";
 
@@ -275,8 +276,8 @@ function parseResolverFinalText(text: string): AutoResolveAgentResult {
           changedPaths: Array.isArray(parsed.changedPaths) ? parsed.changedPaths.filter((v): v is string => typeof v === "string") : undefined,
         };
       }
-    } catch {
-      // Fall through to text classification.
+    } catch (err) {
+      logWarning("recovery", `auto-resolver result JSON parse failed: ${(err as Error).message}`);
     }
   }
   return { status: /resolved/i.test(text) ? "resolved" : "unresolved", summary: text.trim() || "auto-resolver returned no summary" };
@@ -332,8 +333,8 @@ export async function runDefaultAutoResolverAgent(input: AutoResolveAgentInput):
     return parseResolverFinalText(assistantTexts.at(-1) ?? stdout);
   } finally {
     if (tmp) {
-      try { unlinkSync(tmp.filePath); } catch { /* ignore */ }
-      try { rmSync(tmp.dir, { recursive: true, force: true }); } catch { /* ignore */ }
+      try { unlinkSync(tmp.filePath); } catch (err) { logWarning("recovery", `auto-resolver prompt cleanup failed: ${(err as Error).message}`); }
+      try { rmSync(tmp.dir, { recursive: true, force: true }); } catch (err) { logWarning("recovery", `auto-resolver temp directory cleanup failed: ${(err as Error).message}`); }
     }
   }
 }
@@ -397,6 +398,9 @@ export async function maybeAutoResolveGate(input: AutoResolveGateInput): Promise
   });
   if (agentResult.status === "unsafe") {
     return { action: "pause", fingerprint, ...agentResult };
+  }
+  if (agentResult.status === "skipped") {
+    return { action: "skip", fingerprint, ...agentResult };
   }
   if (agentResult.status === "resolved") {
     const cleared = await isGateCleared(input);
